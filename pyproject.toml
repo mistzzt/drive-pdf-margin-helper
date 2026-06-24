@@ -5,3 +5,19 @@ description = "Auto-crop PDF margins from a OneDrive folder for reading on a Kin
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = []
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["scribe_crop"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
