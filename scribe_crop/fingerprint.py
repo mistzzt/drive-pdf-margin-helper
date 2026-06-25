@@ -66,41 +66,31 @@ def compute_fingerprint(
     pdf_path: Path | str,
     *,
     pdf_bytes: bytes | None = None,
-    sidecar_bytes: bytes | None,
-    drive_config_bytes: bytes,
-    tool_version: ToolVersion,
     profile_token: str,
+    tool_version: ToolVersion,
 ) -> str:
+    # The dedup key is "these bytes, run through this exact crop command, with
+    # this toolchain". profile_token is the effective profile's argv (built-in <
+    # drive config < sidecar already merged), so any layer change that alters the
+    # flags moves the key, and one that does not (e.g. a comment-only config edit)
+    # correctly does not force a re-crop.
     h = hashlib.sha256()
     if pdf_bytes is None:
         h.update(_digest_file("pdf", Path(pdf_path)))
     else:
         h.update(_digest_part("pdf", pdf_bytes))
-    h.update(_digest_part("sidecar", sidecar_bytes))
-    h.update(_digest_part("config", drive_config_bytes))
     h.update(_digest_part("tool", tool_version.as_token().encode("utf-8")))
     h.update(_digest_part("profile", profile_token.encode("utf-8")))
     return h.hexdigest()
 
 
-def compute_oversize_fingerprint(
-    *,
-    size: int,
-    sidecar_bytes: bytes | None,
-    drive_config_bytes: bytes,
-    tool_version: ToolVersion,
-    profile_token: str,
-) -> str:
-    # Oversize rejection is a server-config (operational) condition, not a
-    # property of the PDF bytes. We key it off the size rather than hashing the
-    # file so a multi-GB input is never read just to be routed to failed/, and
-    # so it differs from the normal-path fingerprint: if the operator raises
-    # max_input_bytes later, the normal fingerprint no longer matches this
-    # record and the file reprocesses instead of being suppressed forever.
+def compute_oversize_fingerprint(*, size: int) -> str:
+    # Oversize rejection depends only on the byte count, not on PDF content, the
+    # crop profile, or the toolchain: the file is refused before it is read. We
+    # key it off the size (under a distinct domain tag so it never collides with
+    # a normal fingerprint) so that raising max_input_bytes later routes the file
+    # to the normal path, whose fingerprint cannot match this record, and it
+    # reprocesses instead of staying suppressed forever.
     h = hashlib.sha256()
     h.update(_digest_part("oversize", str(size).encode("utf-8")))
-    h.update(_digest_part("sidecar", sidecar_bytes))
-    h.update(_digest_part("config", drive_config_bytes))
-    h.update(_digest_part("tool", tool_version.as_token().encode("utf-8")))
-    h.update(_digest_part("profile", profile_token.encode("utf-8")))
     return h.hexdigest()

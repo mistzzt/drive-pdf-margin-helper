@@ -38,7 +38,6 @@ def _run(config, store, relpath, runner, **kw):
     base = dict(
         config=config,
         drive_crop={},
-        drive_config_bytes=b"",
         store=store,
         tool_version=TV,
         binary="pdfcropmargins",
@@ -314,7 +313,7 @@ def test_oversize_republishes_if_failed_artifact_missing(env):
     assert (small_cfg.failed_dir / "big.pdf").exists()
 
 
-def test_sidecar_unknown_key_is_content_failure(env):
+def test_sidecar_unknown_key_logs_to_failed_without_pdf_copy(env):
     config, store = env
     _drop_pdf(config, "foo.pdf")
     (config.upload_dir / "foo.pdf.toml").write_text("bogus_key = 5\n")
@@ -327,9 +326,28 @@ def test_sidecar_unknown_key_is_content_failure(env):
 
     res = _run(config, store, "foo.pdf", runner)
     assert res.kind is ResultKind.CONTENT_FAILURE
-    assert calls == []
-    assert (config.failed_dir / "foo.pdf").exists()
-    assert store.get("foo.pdf").outcome is Outcome.CONTENT_FAILURE
+    assert calls == []  # never invokes the crop tool
+    # Malformed input: a .log explains it, but the PDF is not copied to failed/.
+    assert not (config.failed_dir / "foo.pdf").exists()
+    log = (config.failed_dir / "foo.pdf.log").read_text()
+    assert "bogus_key" in log
+    rec = store.get("foo.pdf")
+    assert rec.outcome is Outcome.CONTENT_FAILURE
+    assert rec.fingerprint == ""  # no content-hash suppression
+
+
+def test_malformed_sidecar_log_is_idempotent_across_passes(env):
+    config, store = env
+    _drop_pdf(config, "foo.pdf")
+    (config.upload_dir / "foo.pdf.toml").write_text("not = valid = toml\n")
+
+    res1 = _run(config, store, "foo.pdf", make_runner())
+    log_path = config.failed_dir / "foo.pdf.log"
+    mtime1 = log_path.stat().st_mtime_ns
+    res2 = _run(config, store, "foo.pdf", make_runner())
+    assert res1.kind is res2.kind is ResultKind.CONTENT_FAILURE
+    # Re-checked each pass, but the unchanged log is not rewritten (no sync churn).
+    assert log_path.stat().st_mtime_ns == mtime1
 
 
 def test_sidecar_overrides_reach_argv(env):

@@ -195,12 +195,11 @@ def test_bad_config_at_construction_writes_error_and_uses_builtin(config):
     svc = _service(config)
     try:
         assert config.config_error_path.exists()
-        # Built-in fallback: empty crop dict, empty bytes.
+        # Built-in fallback: empty crop dict.
         captured = {}
         svc._process_fn = lambda rp, **kw: captured.update(kw) or ProcessResult(rp, ResultKind.SUCCESS)
         svc._process("a.pdf")
         assert captured["drive_crop"] == {}
-        assert captured["drive_config_bytes"] == b""
     finally:
         svc.close()
 
@@ -240,7 +239,7 @@ def test_readiness_marker_gates_gc(tmp_path):
     assert r.is_current() is True
 
 
-def test_process_uses_same_load_result_for_crop_and_bytes(config):
+def test_process_passes_loaded_crop_profile(config):
     config.drive_config_path.write_text("[crop]\npercent_retain = 7\n")
     svc = _service(config)
     captured = {}
@@ -248,7 +247,6 @@ def test_process_uses_same_load_result_for_crop_and_bytes(config):
     svc._process("a.pdf")
     svc.close()
     assert captured["drive_crop"] == {"percent_retain": 7}
-    assert b"percent_retain = 7" in captured["drive_config_bytes"]
 
 
 def test_worker_thread_accesses_store_cross_thread(config):

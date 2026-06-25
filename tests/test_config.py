@@ -61,14 +61,12 @@ def test_drive_config_valid(tmp_path):
     assert result.ok
     assert result.error is None
     assert result.crop == {"percent_retain": 8, "uniform": True, "pre_crop": 5}
-    assert result.raw_bytes == p.read_bytes()
 
 
 def test_drive_config_absent_is_empty_not_error(tmp_path):
     result = load_drive_config(tmp_path / "missing.toml")
     assert result.ok
     assert result.crop == {}
-    assert result.raw_bytes == b""
 
 
 def test_drive_config_parse_error_falls_back(tmp_path):
@@ -78,7 +76,6 @@ def test_drive_config_parse_error_falls_back(tmp_path):
     assert not result.ok
     assert result.crop is None
     assert "parse error" in result.error
-    assert result.raw_bytes == p.read_bytes()
 
 
 def test_drive_config_unknown_key_falls_back(tmp_path):

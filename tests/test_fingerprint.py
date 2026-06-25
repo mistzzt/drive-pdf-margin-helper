@@ -10,8 +10,6 @@ TV = ToolVersion(pdfcropmargins="2.2.1", ghostscript="10.0")
 
 def _fp(pdf, **kw):
     base = dict(
-        sidecar_bytes=None,
-        drive_config_bytes=b"[crop]\np=8",
         tool_version=TV,
         profile_token="-p 10",
     )
@@ -33,13 +31,9 @@ def test_changed_pdf_changes_fp(tmp_path):
     assert _fp(pdf) != f1
 
 
-def test_changed_config_changes_fp(tmp_path):
-    pdf = tmp_path / "a.pdf"
-    pdf.write_bytes(b"x")
-    assert _fp(pdf, drive_config_bytes=b"a") != _fp(pdf, drive_config_bytes=b"b")
-
-
 def test_profile_token_changes_fp(tmp_path):
+    # The effective profile's argv is the only profile input: any layer change
+    # (built-in/drive/sidecar) that alters the flags reaches the key through here.
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"x")
     assert _fp(pdf, profile_token="-p 10") != _fp(pdf, profile_token="-p 5")
@@ -59,21 +53,6 @@ def test_ghostscript_version_changes_fp(tmp_path):
     assert _fp(pdf, tool_version=other) != _fp(pdf)
 
 
-def test_sidecar_presence_changes_fp(tmp_path):
-    pdf = tmp_path / "a.pdf"
-    pdf.write_bytes(b"x")
-    assert _fp(pdf, sidecar_bytes=b"percent_retain = 15\n") != _fp(
-        pdf, sidecar_bytes=None
-    )
-
-
-def test_changed_sidecar_changes_fp(tmp_path):
-    pdf = tmp_path / "a.pdf"
-    pdf.write_bytes(b"x")
-    f1 = _fp(pdf, sidecar_bytes=b"percent_retain = 15\n")
-    assert _fp(pdf, sidecar_bytes=b"percent_retain = 20\n") != f1
-
-
 def test_pdf_bytes_match_file_read(tmp_path):
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 content")
@@ -83,27 +62,14 @@ def test_pdf_bytes_match_file_read(tmp_path):
 def test_oversize_fingerprint_differs_from_normal(tmp_path):
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"%PDF-1.4 content")
-    oversize = compute_oversize_fingerprint(
-        size=pdf.stat().st_size,
-        sidecar_bytes=None,
-        drive_config_bytes=b"[crop]\np=8",
-        tool_version=TV,
-        profile_token="-p 10",
-    )
+    oversize = compute_oversize_fingerprint(size=pdf.stat().st_size)
     assert oversize != _fp(pdf)
 
 
 def test_oversize_fingerprint_changes_with_size():
-    def fp(size):
-        return compute_oversize_fingerprint(
-            size=size,
-            sidecar_bytes=None,
-            drive_config_bytes=b"",
-            tool_version=TV,
-            profile_token="-p 10",
-        )
-
-    assert fp(100) != fp(200)
+    assert compute_oversize_fingerprint(size=100) != compute_oversize_fingerprint(
+        size=200
+    )
 
 
 def test_probe_tool_version_runs():

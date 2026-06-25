@@ -26,7 +26,7 @@ Clock = Callable[[], float]
 Wait = Callable[[float], bool]
 ProcessFn = Callable[..., ProcessResult]
 
-_BUILTIN_DRIVE_CONFIG = DriveConfigResult(crop={}, error=None, raw_bytes=b"")
+_BUILTIN_DRIVE_CONFIG = DriveConfigResult(crop={}, error=None)
 
 
 @dataclass(frozen=True)
@@ -108,14 +108,13 @@ class Service:
             d.mkdir(parents=True, exist_ok=True)
 
     def _process(self, relpath: str) -> ProcessResult:
-        # Single read of the (atomically rebound) drive config so crop and
-        # raw_bytes always come from the same load, even if a reload races us.
+        # Single read of the (atomically rebound) drive config so the crop
+        # profile comes from one consistent load, even if a reload races us.
         drive = self._drive
         return self._process_fn(
             relpath,
             config=self._config,
             drive_crop=drive.crop or {},
-            drive_config_bytes=drive.raw_bytes or b"",
             store=self._store,
             tool_version=self._tool_version,
             binary=self._binary,

@@ -125,7 +125,6 @@ def load_server_config(path: Path | str) -> ServerConfig:
 class DriveConfigResult:
     crop: dict[str, object] | None
     error: str | None
-    raw_bytes: bytes | None
 
     @property
     def ok(self) -> bool:
@@ -138,22 +137,20 @@ def load_drive_config(path: Path | str) -> DriveConfigResult:
         raw_bytes = path.read_bytes()
     except FileNotFoundError:
         # Absent config is not an error: built-in defaults apply.
-        return DriveConfigResult(crop={}, error=None, raw_bytes=b"")
+        return DriveConfigResult(crop={}, error=None)
 
     try:
         data = tomllib.loads(raw_bytes.decode("utf-8"))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
-        return DriveConfigResult(crop=None, error=f"parse error: {exc}", raw_bytes=raw_bytes)
+        return DriveConfigResult(crop=None, error=f"parse error: {exc}")
 
     crop = data.get("crop", {})
     if not isinstance(crop, dict):
-        return DriveConfigResult(
-            crop=None, error="[crop] must be a table", raw_bytes=raw_bytes
-        )
+        return DriveConfigResult(crop=None, error="[crop] must be a table")
 
     try:
         validated = validate_and_coerce(crop)
     except (ValueError, UnknownProfileKey) as exc:
-        return DriveConfigResult(crop=None, error=str(exc), raw_bytes=raw_bytes)
+        return DriveConfigResult(crop=None, error=str(exc))
 
-    return DriveConfigResult(crop=validated, error=None, raw_bytes=raw_bytes)
+    return DriveConfigResult(crop=validated, error=None)

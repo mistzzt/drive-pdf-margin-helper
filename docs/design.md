@@ -170,17 +170,20 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
    short-window is the secondary guard against in-place writers). A stalled and
    resumed download is handled by the fingerprint: if bytes change later, the
    later event re-enqueues and reprocesses.
-2. **Fingerprint (single consistent read).** In one pass, read and hash all
-   inputs together: `hash(pdf bytes) + hash(sidecar bytes, if any) +
-   hash(drive config.toml) + tool_version + profile_token`, where
-   `tool_version` is the resolved `pdfcropmargins`/`ghostscript` version so a
-   toolchain upgrade re-crops automatically, and `profile_token` is a digest of
-   the built-in default profile so editing those code defaults re-crops
-   automatically too (no manual version bump). If the state store records this
-   exact fingerprint as a success and `processed/<relpath>` exists, skip.
-3. **Build the command.** Compose the effective profile (built-in <
-   `config.toml [crop]` < sidecar), targeting a temp output path on the same
-   filesystem as `processed/`.
+2. **Resolve the effective profile, then fingerprint.** Compose the effective
+   profile (built-in < `config.toml [crop]` < sidecar) and reduce it to its
+   `pdfcropmargins` argv. The dedup key is
+   `hash(pdf bytes + profile argv + tool_version)`, where `tool_version` is the
+   resolved `pdfcropmargins`/`ghostscript` version so a toolchain upgrade re-crops
+   automatically. Keying on the resolved argv means any layer change (built-in
+   defaults, drive config, sidecar) that alters the crop flags re-crops
+   automatically with no manual version bump, while a change that leaves the flags
+   identical (a comment-only config edit) does not. If the state store records
+   this exact fingerprint as a success and `processed/<relpath>` exists, skip.
+   A malformed sidecar/profile has no argv to fingerprint: it is not processed,
+   only logged (see below).
+3. **Build the command** from the resolved argv, targeting a temp output path on
+   the same filesystem as `processed/`.
 4. **Run `pdfcropmargins`** with a timeout.
 5. **On success:** atomically rename the temp output to `processed/<relpath>`,
    then record the fingerprint as a success. (Publish-then-record ordering: if
@@ -193,6 +196,14 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
      `failed/<relpath>` plus `failed/<relpath>.pdf.log`, and record the failure
      fingerprint so the same bytes are not retried forever. These will not
      succeed without the user changing the input or its sidecar.
+   - **Malformed sidecar/profile** (unparseable `.pdf.toml`, unknown crop key):
+     detected before the run, so there is no effective argv to fingerprint and
+     nothing to crop. Write only `failed/<relpath>.pdf.log` (no PDF copy) so the
+     reason is visible on any device, and clear any stale outputs. No suppression
+     fingerprint is recorded; the file is re-checked each pass and fails fast
+     (before `pdfcropmargins` runs). The log write is idempotent so a repeatedly
+     re-checked file does not churn the sync. An empty-fingerprint state row is
+     recorded only so reverse-GC removes the log once the source is deleted.
    - **Environmental failures** (timeout, OOM, missing/again ghostscript, mid-run
      crash, disk full): do **not** persist a permanent suppression. Retry with
      bounded backoff; surface the condition in the service log. These are
@@ -227,11 +238,11 @@ later event (or the reconcile scan) processes it once both are present.
   sync writes and are expected to round-trip to the cloud; conversely, an output
   deletion arriving *from* the cloud is not re-created by the service (the source
   in `upload/` drives output existence, not the other way around).
-- **Profile / config / toolchain changes:** changing built-in code defaults
-  changes `profile_token` (a digest of the built-in profile), editing the drive
-  `config.toml` changes its hash, and a `pdfcropmargins`/`ghostscript` upgrade
-  changes `tool_version`; all fold into
-  the fingerprint, invalidating affected entries so everything re-crops on next
+- **Profile / config / toolchain changes:** the fingerprint keys on the effective
+  profile's argv, so changing built-in defaults, the drive `config.toml [crop]`,
+  or a per-file sidecar re-crops automatically whenever the resolved crop flags
+  change; a `pdfcropmargins`/`ghostscript` upgrade changes `tool_version`; both fold
+  into the fingerprint, invalidating affected entries so everything re-crops on next
   reconcile. Reprocessing is safe because outputs are deterministic and replace
   the previous file at the same relative path via atomic rename.
 
@@ -276,9 +287,9 @@ pre_crop        = 5
 - **Precedence:** built-in defaults < `config.toml [crop]` < per-file sidecar.
 - **Reload:** the watcher also watches this file; on change the service
   recomputes the effective default profile.
-- **Reprocessing:** the config's content hash is folded into every file's
-  fingerprint (alongside `profile_token`), so editing `config.toml` causes the
-  reconcile pass to re-crop everything that relied on defaults.
+- **Reprocessing:** each file's fingerprint keys on its effective profile argv,
+  into which `config.toml [crop]` is merged, so editing `config.toml` re-crops
+  everything that relied on defaults whenever the resolved flags change.
 - **Validation / failure isolation:** unknown keys or a parse error do not crash
   the service. The service keeps using the last-known-good config (or built-in
   defaults on first start) and writes the reason to `ScribeCrop/config.error.log`
@@ -360,9 +371,9 @@ client side (NixOS module), not in this service.
   an environmental failure (simulated timeout / missing tool) retries rather than
   permanently suppressing.
 - **Idempotency:** re-running over an unchanged tree produces no new work;
-  editing a sidecar reprocesses only that file; editing the drive `config.toml`,
-  changing built-in defaults (`profile_token`), or a changed `tool_version`
-  reprocesses all.
+  editing a sidecar reprocesses only that file; a change to the drive
+  `config.toml`, the built-in defaults, or `tool_version` that alters the
+  resolved crop flags reprocesses all.
 - **Config robustness:** a malformed `config.toml` leaves processing on the
   last-known-good profile and produces `config.error.log`; fixing it clears the
   error and reloads.

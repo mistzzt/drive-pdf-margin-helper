@@ -44,18 +44,22 @@ under `upload/`. Output paths mirror that relpath into `processed/` and `failed/
   (`FLAG_MAP`). Profiles layer built-in < drive `config.toml [crop]` < per-file `.pdf.toml`
   sidecar (`merge_profiles`). All config validation/coercion goes through `validate_and_coerce`.
   Adding a crop knob means editing `FLAG_MAP` and `CropProfile` here only.
-- **`fingerprint.py`** computes the dedup key: `hash(pdf + sidecar + drive config + tool
-  version + profile_token)`, where `profile_token` is a digest of the built-in default
-  profile (`BUILTIN_PROFILE_TOKEN` in `profile.py`). Any change to inputs, the toolchain,
-  the drive config, or the built-in defaults invalidates the key and forces a re-crop, so
-  editing built-in defaults needs no manual version bump. Oversize inputs use a separate
-  size-keyed fingerprint so raising `max_input_bytes` later un-suppresses them.
-- **`processor.py`** (`process_pdf`) is the core unit: single consistent read of all inputs,
-  fingerprint skip-check against the state store, build argv, run with timeout, then publish.
-  Failures are classified into `CONTENT_FAILURE` (input-bound, suppressed permanently for
-  identical bytes, copied to `failed/` with a `.log`) vs `ENVIRONMENTAL_FAILURE` (timeout /
-  OOM / missing binary, retried with backoff, never suppressed). Classification of nonzero
-  exits is by stderr substring (`_CONTENT_STDERR_PATTERNS`); unrecognized = environmental.
+- **`fingerprint.py`** computes the dedup key: `hash(pdf + profile_token + tool version)`,
+  where `profile_token` is the *effective* profile's emitted argv (built-in < drive config
+  < sidecar, already merged). Keying on the resolved argv means any layer change that alters
+  the crop flags invalidates the key, one that does not (a comment-only config edit) does
+  not, and there is no manual version to bump. Oversize inputs use a separate size-keyed
+  fingerprint so raising `max_input_bytes` later un-suppresses them.
+- **`processor.py`** (`process_pdf`) is the core unit: resolve the effective profile, compute
+  the fingerprint from its argv, skip-check against the state store, build argv, run with
+  timeout, then publish. Failures are classified into `CONTENT_FAILURE` (input-bound,
+  suppressed permanently for identical bytes, copied to `failed/` with a `.log`) vs
+  `ENVIRONMENTAL_FAILURE` (timeout / OOM / missing binary, retried with backoff, never
+  suppressed). Classification of nonzero exits is by stderr substring
+  (`_CONTENT_STDERR_PATTERNS`); unrecognized = environmental. A malformed sidecar/profile is
+  a special case (`_record_malformed`): with no valid argv there is nothing to fingerprint or
+  crop, so it gets only a `.log` in `failed/` (no PDF copy), an empty-fingerprint state row
+  for reverse-GC tracking, and no suppression (re-checked each pass, failing fast).
 - **`state.py`** is a WAL-mode SQLite store (relpath -> fingerprint + outcome + timestamps),
   thread-safe via a lock, shared between the main and worker threads.
 - **`reconcile.py`** does the backstop passes: forward (process anything whose fingerprint
@@ -83,9 +87,10 @@ under `upload/`. Output paths mirror that relpath into `processed/` and `failed/
 - **Reverse-GC is destructive and gated.** It runs only when the mirror is known-current
   (`assume_current` or an existing `readiness_marker` outside the synced subtree). An absent
   source on a lagging/unsynced mirror is NOT a deletion. The forward pass has no such hazard.
-- **Single consistent read.** Read each input's bytes once and feed the same bytes to both the
-  fingerprint and the profile/parser, so the profile applied always matches the fingerprint
-  recorded, even if a config reload races.
+- **Fingerprint matches the command.** Resolve the effective profile once, fingerprint its
+  argv, and build the `pdfcropmargins` command from that same argv, so the profile applied
+  always matches the fingerprint recorded, even if a config reload races. Read each input
+  (sidecar, drive config snapshot) once for that single resolution.
 
 ## Project conventions
 

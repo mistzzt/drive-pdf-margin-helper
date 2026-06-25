@@ -76,6 +76,19 @@ def test_gc_removes_previously_seen_now_gone_when_mirror_current(env):
     assert store.get("a.pdf") is None
 
 
+def test_gc_removes_malformed_log_with_empty_fingerprint(env):
+    config, store = env
+    # Mirrors what _record_malformed leaves behind: only a .log (no PDF copy) and
+    # an empty-fingerprint CONTENT_FAILURE row whose sole purpose is to let GC
+    # remove the orphaned log once the source is deleted.
+    (config.failed_dir / "bad.pdf.log").write_text("invalid sidecar: ...")
+    store.upsert("bad.pdf", "", Outcome.CONTENT_FAILURE)
+    report = reverse_gc(config, store=store, mirror_current=True)
+    assert report.gc_removed == ["bad.pdf"]
+    assert not (config.failed_dir / "bad.pdf.log").exists()
+    assert store.get("bad.pdf") is None
+
+
 def test_gc_does_not_run_when_mirror_not_current(env):
     config, store = env
     (config.processed_dir / "a.pdf").write_bytes(b"out")
