@@ -12,6 +12,7 @@ class RetryBackoff:
     initial_seconds: float = 30.0
     max_seconds: float = 3600.0
     multiplier: float = 2.0
+    max_attempts: int = 8
 
 
 @dataclass(frozen=True)
@@ -65,7 +66,7 @@ _SCALAR_FIELDS = {
 }
 
 
-_RETRY_BACKOFF_FIELDS = {"initial_seconds", "max_seconds", "multiplier"}
+_RETRY_BACKOFF_FIELDS = {"initial_seconds", "max_seconds", "multiplier", "max_attempts"}
 _ALLOWED_SERVER_KEYS = set(_SCALAR_FIELDS) | {"root", "state_path", "retry_backoff"}
 
 
@@ -97,11 +98,21 @@ def load_server_config(path: Path | str) -> ServerConfig:
             raise ValueError(
                 f"unknown retry_backoff keys: {', '.join(sorted(unknown_rb))}"
             )
-        kwargs["retry_backoff"] = RetryBackoff(
+        backoff = RetryBackoff(
             initial_seconds=float(rb.get("initial_seconds", 30.0)),
             max_seconds=float(rb.get("max_seconds", 3600.0)),
             multiplier=float(rb.get("multiplier", 2.0)),
+            max_attempts=int(rb.get("max_attempts", 8)),
         )
+        if backoff.initial_seconds <= 0:
+            raise ValueError("retry_backoff.initial_seconds must be > 0")
+        if backoff.multiplier < 1.0:
+            raise ValueError("retry_backoff.multiplier must be >= 1.0")
+        if backoff.max_seconds < backoff.initial_seconds:
+            raise ValueError("retry_backoff.max_seconds must be >= initial_seconds")
+        if backoff.max_attempts < 1:
+            raise ValueError("retry_backoff.max_attempts must be >= 1")
+        kwargs["retry_backoff"] = backoff
 
     cfg = ServerConfig(**kwargs)  # type: ignore[arg-type]
     if cfg.worker_count < 1:

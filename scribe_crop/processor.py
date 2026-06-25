@@ -30,6 +30,7 @@ class ResultKind(Enum):
     SKIPPED = "skipped"
     CONTENT_FAILURE = "content_failure"
     ENVIRONMENTAL_FAILURE = "environmental_failure"
+    CANCELLED = "cancelled"
 
     @property
     def retryable(self) -> bool:

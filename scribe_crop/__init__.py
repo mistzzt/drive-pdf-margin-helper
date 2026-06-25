@@ -32,7 +32,9 @@ from .reconcile import (
     reconcile,
     reverse_gc,
 )
+from .service import MirrorReadiness, Service
 from .state import Outcome, StateRecord, StateStore
+from .watcher import EventTarget, UploadEventRouter, WatchEvent, Watcher
 
 __all__ = [
     "BUILTIN_PROFILE",
@@ -40,6 +42,8 @@ __all__ = [
     "BinaryNotFound",
     "CropProfile",
     "DriveConfigResult",
+    "EventTarget",
+    "MirrorReadiness",
     "Outcome",
     "OutOfMemory",
     "ProcessResult",
@@ -48,11 +52,15 @@ __all__ = [
     "RetryBackoff",
     "RunResult",
     "RunTimeout",
+    "Service",
     "ServerConfig",
     "StateRecord",
     "StateStore",
     "ToolVersion",
     "UnknownProfileKey",
+    "UploadEventRouter",
+    "WatchEvent",
+    "Watcher",
     "classify_run_failure",
     "compute_fingerprint",
     "forward_pass",

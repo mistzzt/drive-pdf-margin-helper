@@ -4,7 +4,12 @@ version = "0.1.0"
 description = "Auto-crop PDF margins from a OneDrive folder for reading on a Kindle Scribe"
 readme = "README.md"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "watchdog>=6.0.0",
+]
+
+[project.scripts]
+scribe-crop = "scribe_crop.cli:main"
 
 [build-system]
 requires = ["hatchling"]

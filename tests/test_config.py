@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from scribe_crop.config import load_drive_config, load_server_config
 
 
@@ -37,6 +39,22 @@ def test_server_config_overrides(tmp_path):
     assert cfg.resolved_state_path == Path("/var/state.db")
     assert cfg.retry_backoff.initial_seconds == 10.0
     assert cfg.retry_backoff.multiplier == 3.0
+
+
+@pytest.mark.parametrize(
+    "backoff",
+    [
+        "initial_seconds = 0\nmax_seconds = 100\nmultiplier = 2\n",
+        "initial_seconds = -1\nmax_seconds = 100\nmultiplier = 2\n",
+        "initial_seconds = 10\nmax_seconds = 100\nmultiplier = 0.5\n",
+        "initial_seconds = 10\nmax_seconds = 5\nmultiplier = 2\n",
+    ],
+)
+def test_server_config_rejects_bad_retry_backoff(tmp_path, backoff):
+    cfg_path = tmp_path / "server.toml"
+    cfg_path.write_text('root = "/srv/x"\n[retry_backoff]\n' + backoff)
+    with pytest.raises(ValueError):
+        load_server_config(cfg_path)
 
 
 def test_drive_config_valid(tmp_path):
