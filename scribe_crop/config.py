@@ -37,6 +37,12 @@ class ServerConfig:
     def failed_dir(self) -> Path:
         return self.root / "failed"
 
+    # Shares the root mount (so os.replace into processed/failed is atomic) but
+    # sits outside the synced content dirs; must be excluded from drive sync.
+    @property
+    def tmp_dir(self) -> Path:
+        return self.root / ".scribe-crop-tmp"
+
     @property
     def drive_config_path(self) -> Path:
         return self.root / "config.toml"

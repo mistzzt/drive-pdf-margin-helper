@@ -76,7 +76,11 @@ be explicit to avoid corruption, conflict copies, and loops:
   `rename(2)` is atomic only within one mount, so the temp dir must share the
   mount with the output dirs; if a configurable temp location is ever introduced,
   it must be validated against the output mount (else fall back to a non-atomic
-  copy, losing this guarantee).
+  copy, losing this guarantee). Temp files are written to a dedicated scratch dir
+  (`<root>/.scribe-crop-tmp/`) that shares the root mount but sits outside the
+  synced content dirs, so transient `.tmp` files never appear under
+  `upload/`/`processed/`/`failed/`. The drive sync config must exclude this
+  scratch dir (it is not part of the synced subtree).
 - **Inputs rely on the abraunegg client's atomic-move semantics.** That client
   downloads to a temporary name and `rename`s the finished file into place, so
   the watcher's primary trigger is a move into `upload/`. The size-stability
