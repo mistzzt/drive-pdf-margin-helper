@@ -16,7 +16,7 @@ its native OneDrive integration.
 |---|---|---|
 | Drive provider | OneDrive | Best server ergonomics on NixOS: the abraunegg `onedrive` client has native `--monitor` (inotify) sync, simpler OAuth than Google Drive, and a first-class NixOS module. |
 | Detection | Near-realtime | `onedrive --monitor` keeps a local mirror in sync both ways; a separate inotify watcher on the local `upload/` dir triggers processing within seconds. |
-| Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Already packaged in `pkgs.nix`. |
+| Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Vendored at `nix/pdfcropmargins.nix`. |
 | Crop config | Auto-crop default + per-file sidecar overrides | One sensible profile for everything; optional `<name>.pdf.toml` sidecar for documents that need tuning. |
 | Originals | Non-destructive | Original stays in `upload/`; cropped copy written to `processed/` at the same relative path. Re-runnable if settings change. |
 | Output integrity | Atomic publish | Outputs are written to a temp file and atomically renamed into place; the processor is the sole writer of `processed/`/`failed/`. Prevents the sync client uploading half-written files or creating conflict copies. |
@@ -76,7 +76,11 @@ be explicit to avoid corruption, conflict copies, and loops:
   `rename(2)` is atomic only within one mount, so the temp dir must share the
   mount with the output dirs; if a configurable temp location is ever introduced,
   it must be validated against the output mount (else fall back to a non-atomic
-  copy, losing this guarantee).
+  copy, losing this guarantee). Temp files are written to a dedicated scratch dir
+  (`<root>/.scribe-crop-tmp/`) that shares the root mount but sits outside the
+  synced content dirs, so transient `.tmp` files never appear under
+  `upload/`/`processed/`/`failed/`. The drive sync config must exclude this
+  scratch dir (it is not part of the synced subtree).
 - **Inputs rely on the abraunegg client's atomic-move semantics.** That client
   downloads to a temporary name and `rename`s the finished file into place, so
   the watcher's primary trigger is a move into `upload/`. The size-stability
@@ -123,15 +127,16 @@ overlaid with the drive `config.toml [crop]` table (see Configuration). Tuned
 for single-column-friendly reading on the Scribe with consistent page sizes.
 Built-in defaults:
 
-- `-u` uniform crop amount across all pages
-- `-s` force all output pages to the same size
 - `-p 10` retain 10% of existing margins (the tool default)
+- neither `-u` nor `-s`: each page is cropped to its own bounding box
 
-Rationale: `-u -s` gives a stable, consistent page box across the document
-(no jitter between pages on the Scribe), and retaining a small margin avoids
-clipping descenders/superscripts. The default percentage and other knobs are
-tunable from any device via the drive `config.toml` without touching code or
-the server.
+Rationale: cropping per page (no `-u`/`-s`) gives each page its tightest crop,
+so pages with wide margins are trimmed more than pages with narrow margins
+instead of every page sharing one conservative crop amount. Retaining a small
+margin avoids clipping descenders/superscripts. Operators who prefer a stable,
+consistent page box across the document (no size jitter between pages on the
+Scribe) can set `uniform`/`same_size` from any device via the drive
+`config.toml` without touching code or the server.
 
 ### Per-file sidecar overrides
 
@@ -165,15 +170,20 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
    short-window is the secondary guard against in-place writers). A stalled and
    resumed download is handled by the fingerprint: if bytes change later, the
    later event re-enqueues and reprocesses.
-2. **Fingerprint (single consistent read).** In one pass, read and hash all
-   inputs together: `hash(pdf bytes) + hash(sidecar bytes, if any) +
-   hash(drive config.toml) + tool_version + profile_version`, where
-   `tool_version` is the resolved `pdfcropmargins`/`ghostscript` version so a
-   toolchain upgrade re-crops automatically. If the state store records this
-   exact fingerprint as a success and `processed/<relpath>` exists, skip.
-3. **Build the command.** Compose the effective profile (built-in <
-   `config.toml [crop]` < sidecar), targeting a temp output path on the same
-   filesystem as `processed/`.
+2. **Resolve the effective profile, then fingerprint.** Compose the effective
+   profile (built-in < `config.toml [crop]` < sidecar) and reduce it to its
+   `pdfcropmargins` argv. The dedup key is
+   `hash(pdf bytes + profile argv + tool_version)`, where `tool_version` is the
+   resolved `pdfcropmargins`/`ghostscript` version so a toolchain upgrade re-crops
+   automatically. Keying on the resolved argv means any layer change (built-in
+   defaults, drive config, sidecar) that alters the crop flags re-crops
+   automatically with no manual version bump, while a change that leaves the flags
+   identical (a comment-only config edit) does not. If the state store records
+   this exact fingerprint as a success and `processed/<relpath>` exists, skip.
+   A malformed sidecar/profile has no argv to fingerprint: it is not processed,
+   only logged (see below).
+3. **Build the command** from the resolved argv, targeting a temp output path on
+   the same filesystem as `processed/`.
 4. **Run `pdfcropmargins`** with a timeout.
 5. **On success:** atomically rename the temp output to `processed/<relpath>`,
    then record the fingerprint as a success. (Publish-then-record ordering: if
@@ -186,6 +196,14 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
      `failed/<relpath>` plus `failed/<relpath>.pdf.log`, and record the failure
      fingerprint so the same bytes are not retried forever. These will not
      succeed without the user changing the input or its sidecar.
+   - **Malformed sidecar/profile** (unparseable `.pdf.toml`, unknown crop key):
+     detected before the run, so there is no effective argv to fingerprint and
+     nothing to crop. Write only `failed/<relpath>.pdf.log` (no PDF copy) so the
+     reason is visible on any device, and clear any stale outputs. No suppression
+     fingerprint is recorded; the file is re-checked each pass and fails fast
+     (before `pdfcropmargins` runs). The log write is idempotent so a repeatedly
+     re-checked file does not churn the sync. An empty-fingerprint state row is
+     recorded only so reverse-GC removes the log once the source is deleted.
    - **Environmental failures** (timeout, OOM, missing/again ghostscript, mid-run
      crash, disk full): do **not** persist a permanent suppression. Retry with
      bounded backoff; surface the condition in the service log. These are
@@ -220,10 +238,11 @@ later event (or the reconcile scan) processes it once both are present.
   sync writes and are expected to round-trip to the cloud; conversely, an output
   deletion arriving *from* the cloud is not re-created by the service (the source
   in `upload/` drives output existence, not the other way around).
-- **Profile / config / toolchain changes:** changing built-in code defaults
-  bumps `profile_version`, editing the drive `config.toml` changes its hash, and
-  a `pdfcropmargins`/`ghostscript` upgrade changes `tool_version`; all fold into
-  the fingerprint, invalidating affected entries so everything re-crops on next
+- **Profile / config / toolchain changes:** the fingerprint keys on the effective
+  profile's argv, so changing built-in defaults, the drive `config.toml [crop]`,
+  or a per-file sidecar re-crops automatically whenever the resolved crop flags
+  change; a `pdfcropmargins`/`ghostscript` upgrade changes `tool_version`; both fold
+  into the fingerprint, invalidating affected entries so everything re-crops on next
   reconcile. Reprocessing is safe because outputs are deterministic and replace
   the previous file at the same relative path via atomic rename.
 
@@ -262,17 +281,15 @@ sidecar schema:
 ```toml
 [crop]
 percent_retain  = 8
-uniform         = true
-same_size       = true
 pre_crop        = 5
 ```
 
 - **Precedence:** built-in defaults < `config.toml [crop]` < per-file sidecar.
 - **Reload:** the watcher also watches this file; on change the service
   recomputes the effective default profile.
-- **Reprocessing:** the config's content hash is folded into every file's
-  fingerprint (alongside `profile_version`), so editing `config.toml` causes the
-  reconcile pass to re-crop everything that relied on defaults.
+- **Reprocessing:** each file's fingerprint keys on its effective profile argv,
+  into which `config.toml [crop]` is merged, so editing `config.toml` re-crops
+  everything that relied on defaults whenever the resolved flags change.
 - **Validation / failure isolation:** unknown keys or a parse error do not crash
   the service. The service keeps using the last-known-good config (or built-in
   defaults on first start) and writes the reason to `ScribeCrop/config.error.log`
@@ -285,7 +302,6 @@ Operational settings, kept off the drive because a bad value could break the
 daemon:
 
 - `root`: local mirror root containing `config.toml` + `upload/processed/failed`.
-- `profile_version`: integer (bumped when built-in code defaults change).
 - `stability_seconds`, `process_timeout_seconds`, `worker_count`.
 - `max_input_bytes`: inputs larger than this go straight to `failed/` with a log.
 - `retry_backoff`: bounds for retrying environmental failures.
@@ -298,8 +314,10 @@ client side (NixOS module), not in this service.
 
 - **OneDrive client:** `services.onedrive` for the target user, `sync_list`
   restricted to the `ScribeCrop/` subtree, running in monitor mode.
-- **Cropping toolchain:** `pdfcropmargins` from `pkgs.nix` on the service PATH
-  (it already wraps in `ghostscript` + `poppler_utils`).
+- **Cropping toolchain:** `pdfcropmargins` (vendored at `nix/pdfcropmargins.nix`)
+  plus `ghostscript` on the service PATH. `pdfcropmargins` wraps `ghostscript` +
+  `poppler_utils` for its own children, but the service probes `gs --version`
+  directly for the fingerprint, so `ghostscript` is on the service PATH too.
 - **`scribe-crop` service:** a systemd service running the Python app, ordered
   after the onedrive mirror is available, with the config above. Restart on
   failure.
@@ -353,8 +371,9 @@ client side (NixOS module), not in this service.
   an environmental failure (simulated timeout / missing tool) retries rather than
   permanently suppressing.
 - **Idempotency:** re-running over an unchanged tree produces no new work;
-  editing a sidecar reprocesses only that file; editing the drive `config.toml`,
-  bumping `profile_version`, or a changed `tool_version` reprocesses all.
+  editing a sidecar reprocesses only that file; a change to the drive
+  `config.toml`, the built-in defaults, or `tool_version` that alters the
+  resolved crop flags reprocesses all.
 - **Config robustness:** a malformed `config.toml` leaves processing on the
   last-known-good profile and produces `config.error.log`; fixing it clears the
   error and reloads.

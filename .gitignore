@@ -228,3 +228,7 @@ out/*
 !out/.gitkeep
 *.db
 *.sqlite
+
+# Nix build outputs
+result
+result-*
