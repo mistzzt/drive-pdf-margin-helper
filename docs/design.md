@@ -16,7 +16,7 @@ its native OneDrive integration.
 |---|---|---|
 | Drive provider | OneDrive | Best server ergonomics on NixOS: the abraunegg `onedrive` client has native `--monitor` (inotify) sync, simpler OAuth than Google Drive, and a first-class NixOS module. |
 | Detection | Near-realtime | `onedrive --monitor` keeps a local mirror in sync both ways; a separate inotify watcher on the local `upload/` dir triggers processing within seconds. |
-| Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Already packaged in `pkgs.nix`. |
+| Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Vendored at `nix/pdfcropmargins.nix`. |
 | Crop config | Auto-crop default + per-file sidecar overrides | One sensible profile for everything; optional `<name>.pdf.toml` sidecar for documents that need tuning. |
 | Originals | Non-destructive | Original stays in `upload/`; cropped copy written to `processed/` at the same relative path. Re-runnable if settings change. |
 | Output integrity | Atomic publish | Outputs are written to a temp file and atomically renamed into place; the processor is the sole writer of `processed/`/`failed/`. Prevents the sync client uploading half-written files or creating conflict copies. |
@@ -302,8 +302,10 @@ client side (NixOS module), not in this service.
 
 - **OneDrive client:** `services.onedrive` for the target user, `sync_list`
   restricted to the `ScribeCrop/` subtree, running in monitor mode.
-- **Cropping toolchain:** `pdfcropmargins` from `pkgs.nix` on the service PATH
-  (it already wraps in `ghostscript` + `poppler_utils`).
+- **Cropping toolchain:** `pdfcropmargins` (vendored at `nix/pdfcropmargins.nix`)
+  plus `ghostscript` on the service PATH. `pdfcropmargins` wraps `ghostscript` +
+  `poppler_utils` for its own children, but the service probes `gs --version`
+  directly for the fingerprint, so `ghostscript` is on the service PATH too.
 - **`scribe-crop` service:** a systemd service running the Python app, ordered
   after the onedrive mirror is available, with the config above. Restart on
   failure.

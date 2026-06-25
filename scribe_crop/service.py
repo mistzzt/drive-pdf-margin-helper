@@ -253,6 +253,12 @@ class Service:
     def run(self, *, heartbeat_seconds: float = 300.0) -> None:
         self.ensure_dirs()
         log.info("tool versions: %s", self._tool_version.as_token())
+        if self._tool_version.pdfcropmargins is None or self._tool_version.ghostscript is None:
+            log.warning(
+                "tool version probe incomplete (%s); a null half weakens "
+                "upgrade-triggered re-cropping",
+                self._tool_version.as_token(),
+            )
         self.reconcile_startup()
 
         workers = [
