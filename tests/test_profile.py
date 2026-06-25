@@ -2,6 +2,7 @@ import pytest
 
 from scribe_crop.profile import (
     BUILTIN_PROFILE,
+    BUILTIN_PROFILE_TOKEN,
     CropProfile,
     UnknownProfileKey,
     merge_profiles,
@@ -11,7 +12,15 @@ from scribe_crop.profile import (
 
 def test_builtin_argv():
     argv = profile_to_argv(BUILTIN_PROFILE)
-    assert argv == ["-p", "10", "-u", "-s"]
+    assert argv == ["-p", "10"]
+
+
+def test_builtin_profile_token_is_stable():
+    # The token is folded into the fingerprint; pinning its exact value locks the
+    # contract so a FLAG_MAP reorder or default tweak is a deliberate, visible
+    # change (and forces a re-crop) rather than a silent one.
+    assert BUILTIN_PROFILE_TOKEN == "-p 10"
+    assert BUILTIN_PROFILE_TOKEN == " ".join(profile_to_argv(BUILTIN_PROFILE))
 
 
 def test_all_flag_mappings():
@@ -102,14 +111,14 @@ def test_merge_precedence_builtin_drive_sidecar():
     )
     assert merged.percent_retain == 15  # sidecar wins
     assert merged.pre_crop == 5  # drive layer survives
-    assert merged.uniform is True  # builtin survives
-    assert merged.same_size is True
+    assert merged.uniform is False  # builtin survives
+    assert merged.same_size is False
 
 
 def test_merge_drive_over_builtin():
     merged = merge_profiles(BUILTIN_PROFILE, drive_config={"percent_retain": 8})
     assert merged.percent_retain == 8
-    assert merged.uniform is True
+    assert merged.uniform is False
 
 
 def test_merge_rejects_unknown_in_layer():

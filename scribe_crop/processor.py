@@ -18,6 +18,7 @@ from .fingerprint import (
 )
 from .profile import (
     BUILTIN_PROFILE,
+    BUILTIN_PROFILE_TOKEN,
     UnknownProfileKey,
     merge_profiles,
     profile_to_argv,
@@ -203,7 +204,7 @@ def process_pdf(
             sidecar_bytes=sidecar_bytes,
             drive_config_bytes=drive_config_bytes,
             tool_version=tool_version,
-            profile_version=config.profile_version,
+            profile_token=BUILTIN_PROFILE_TOKEN,
         )
         record = store.get(relpath)
         if (
@@ -236,7 +237,7 @@ def process_pdf(
         sidecar_bytes=sidecar_bytes,
         drive_config_bytes=drive_config_bytes,
         tool_version=tool_version,
-        profile_version=config.profile_version,
+        profile_token=BUILTIN_PROFILE_TOKEN,
     )
 
     record = store.get(relpath)

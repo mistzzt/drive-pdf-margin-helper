@@ -18,7 +18,6 @@ class RetryBackoff:
 @dataclass(frozen=True)
 class ServerConfig:
     root: Path
-    profile_version: int = 1
     stability_seconds: float = 5.0
     process_timeout_seconds: float = 300.0
     worker_count: int = 1
@@ -58,7 +57,6 @@ class ServerConfig:
 
 
 _SCALAR_FIELDS = {
-    "profile_version": int,
     "stability_seconds": float,
     "process_timeout_seconds": float,
     "worker_count": int,

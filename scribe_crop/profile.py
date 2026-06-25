@@ -167,4 +167,15 @@ def _fmt(value: object) -> object:
     return value
 
 
-BUILTIN_PROFILE = CropProfile(uniform=True, same_size=True, percent_retain=10)
+BUILTIN_PROFILE = CropProfile(uniform=False, same_size=False, percent_retain=10)
+
+# Folded into the fingerprint so editing the built-in defaults (which live in
+# code, not in any hashed file) invalidates the dedup key and forces a re-crop.
+# The drive config.toml and per-file sidecars are hashed as raw bytes elsewhere;
+# this covers the one profile layer that has no on-disk representation.
+#
+# It keys on the *emitted argv*, not the dataclass fields, by design: the argv is
+# exactly what determines pdfcropmargins' output, so a built-in edit that doesn't
+# change the argv (e.g. flipping a field between None and False, both of which omit
+# the flag) also doesn't change the crop and correctly does not force a re-crop.
+BUILTIN_PROFILE_TOKEN = " ".join(profile_to_argv(BUILTIN_PROFILE))

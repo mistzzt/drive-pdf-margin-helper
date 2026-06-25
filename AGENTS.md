@@ -45,8 +45,10 @@ under `upload/`. Output paths mirror that relpath into `processed/` and `failed/
   sidecar (`merge_profiles`). All config validation/coercion goes through `validate_and_coerce`.
   Adding a crop knob means editing `FLAG_MAP` and `CropProfile` here only.
 - **`fingerprint.py`** computes the dedup key: `hash(pdf + sidecar + drive config + tool
-  version + profile_version)`. Any change to inputs, the toolchain, the drive config, or
-  `profile_version` invalidates the key and forces a re-crop. Oversize inputs use a separate
+  version + profile_token)`, where `profile_token` is a digest of the built-in default
+  profile (`BUILTIN_PROFILE_TOKEN` in `profile.py`). Any change to inputs, the toolchain,
+  the drive config, or the built-in defaults invalidates the key and forces a re-crop, so
+  editing built-in defaults needs no manual version bump. Oversize inputs use a separate
   size-keyed fingerprint so raising `max_input_bytes` later un-suppresses them.
 - **`processor.py`** (`process_pdf`) is the core unit: single consistent read of all inputs,
   fingerprint skip-check against the state store, build argv, run with timeout, then publish.

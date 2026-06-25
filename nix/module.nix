@@ -56,7 +56,6 @@ in {
       type = tomlFormat.type;
       default = {};
       example = {
-        profile_version = 1;
         stability_seconds = 5.0;
         worker_count = 1;
         retry_backoff.max_attempts = 8;

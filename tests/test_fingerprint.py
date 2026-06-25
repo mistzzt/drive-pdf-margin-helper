@@ -13,7 +13,7 @@ def _fp(pdf, **kw):
         sidecar_bytes=None,
         drive_config_bytes=b"[crop]\np=8",
         tool_version=TV,
-        profile_version=1,
+        profile_token="-p 10",
     )
     base.update(kw)
     return compute_fingerprint(pdf, **base)
@@ -39,10 +39,10 @@ def test_changed_config_changes_fp(tmp_path):
     assert _fp(pdf, drive_config_bytes=b"a") != _fp(pdf, drive_config_bytes=b"b")
 
 
-def test_profile_version_changes_fp(tmp_path):
+def test_profile_token_changes_fp(tmp_path):
     pdf = tmp_path / "a.pdf"
     pdf.write_bytes(b"x")
-    assert _fp(pdf, profile_version=1) != _fp(pdf, profile_version=2)
+    assert _fp(pdf, profile_token="-p 10") != _fp(pdf, profile_token="-p 5")
 
 
 def test_tool_version_changes_fp(tmp_path):
@@ -88,7 +88,7 @@ def test_oversize_fingerprint_differs_from_normal(tmp_path):
         sidecar_bytes=None,
         drive_config_bytes=b"[crop]\np=8",
         tool_version=TV,
-        profile_version=1,
+        profile_token="-p 10",
     )
     assert oversize != _fp(pdf)
 
@@ -100,7 +100,7 @@ def test_oversize_fingerprint_changes_with_size():
             sidecar_bytes=None,
             drive_config_bytes=b"",
             tool_version=TV,
-            profile_version=1,
+            profile_token="-p 10",
         )
 
     assert fp(100) != fp(200)

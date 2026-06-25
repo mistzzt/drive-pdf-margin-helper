@@ -106,7 +106,6 @@
                 root = "/home/scribe/OneDrive/ScribeCrop";
                 readinessMarker = "/run/onedrive-ready/mirror-ready";
                 settings = {
-                  profile_version = 1;
                   worker_count = 1;
                 };
               };

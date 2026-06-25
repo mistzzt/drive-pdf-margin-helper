@@ -37,8 +37,10 @@ outputs on the next reconcile (see the readiness-marker note below).
 
 The crop profile is layered, lowest precedence first:
 
-1. **Built-in defaults**: `-u` (uniform crop), `-s` (same output page size),
-   `-p 10` (retain 10% of existing margins).
+1. **Built-in defaults**: `-p 10` (retain 10% of existing margins). Each page is
+   cropped to its own bounding box (no `-u`/`-s`), so a page with wide margins is
+   trimmed more than a page with narrow margins instead of all pages sharing one
+   crop. Set `uniform`/`same_size` if you want a single consistent page box.
 2. **Global `config.toml`** at the synced root, in a `[crop]` table. Editable from
    any device; on change the service re-crops everything that relied on defaults.
 3. **Per-file sidecar** `<name>.pdf.toml` next to the source PDF in `upload/`.
@@ -65,8 +67,6 @@ Example global `config.toml`:
 ```toml
 [crop]
 percent_retain = 8
-uniform        = true
-same_size      = true
 pre_crop       = 5
 ```
 
@@ -94,7 +94,6 @@ Add this flake as an input and import its module:
             root = "/home/alice/OneDrive/ScribeCrop";
             readinessMarker = "/run/onedrive-ready/mirror-ready";
             settings = {
-              profile_version = 1;
               stability_seconds = 5.0;
               process_timeout_seconds = 300.0;
               worker_count = 1;

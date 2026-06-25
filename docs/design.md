@@ -127,15 +127,16 @@ overlaid with the drive `config.toml [crop]` table (see Configuration). Tuned
 for single-column-friendly reading on the Scribe with consistent page sizes.
 Built-in defaults:
 
-- `-u` uniform crop amount across all pages
-- `-s` force all output pages to the same size
 - `-p 10` retain 10% of existing margins (the tool default)
+- neither `-u` nor `-s`: each page is cropped to its own bounding box
 
-Rationale: `-u -s` gives a stable, consistent page box across the document
-(no jitter between pages on the Scribe), and retaining a small margin avoids
-clipping descenders/superscripts. The default percentage and other knobs are
-tunable from any device via the drive `config.toml` without touching code or
-the server.
+Rationale: cropping per page (no `-u`/`-s`) gives each page its tightest crop,
+so pages with wide margins are trimmed more than pages with narrow margins
+instead of every page sharing one conservative crop amount. Retaining a small
+margin avoids clipping descenders/superscripts. Operators who prefer a stable,
+consistent page box across the document (no size jitter between pages on the
+Scribe) can set `uniform`/`same_size` from any device via the drive
+`config.toml` without touching code or the server.
 
 ### Per-file sidecar overrides
 
@@ -171,9 +172,11 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
    later event re-enqueues and reprocesses.
 2. **Fingerprint (single consistent read).** In one pass, read and hash all
    inputs together: `hash(pdf bytes) + hash(sidecar bytes, if any) +
-   hash(drive config.toml) + tool_version + profile_version`, where
+   hash(drive config.toml) + tool_version + profile_token`, where
    `tool_version` is the resolved `pdfcropmargins`/`ghostscript` version so a
-   toolchain upgrade re-crops automatically. If the state store records this
+   toolchain upgrade re-crops automatically, and `profile_token` is a digest of
+   the built-in default profile so editing those code defaults re-crops
+   automatically too (no manual version bump). If the state store records this
    exact fingerprint as a success and `processed/<relpath>` exists, skip.
 3. **Build the command.** Compose the effective profile (built-in <
    `config.toml [crop]` < sidecar), targeting a temp output path on the same
@@ -225,8 +228,9 @@ later event (or the reconcile scan) processes it once both are present.
   deletion arriving *from* the cloud is not re-created by the service (the source
   in `upload/` drives output existence, not the other way around).
 - **Profile / config / toolchain changes:** changing built-in code defaults
-  bumps `profile_version`, editing the drive `config.toml` changes its hash, and
-  a `pdfcropmargins`/`ghostscript` upgrade changes `tool_version`; all fold into
+  changes `profile_token` (a digest of the built-in profile), editing the drive
+  `config.toml` changes its hash, and a `pdfcropmargins`/`ghostscript` upgrade
+  changes `tool_version`; all fold into
   the fingerprint, invalidating affected entries so everything re-crops on next
   reconcile. Reprocessing is safe because outputs are deterministic and replace
   the previous file at the same relative path via atomic rename.
@@ -266,8 +270,6 @@ sidecar schema:
 ```toml
 [crop]
 percent_retain  = 8
-uniform         = true
-same_size       = true
 pre_crop        = 5
 ```
 
@@ -275,7 +277,7 @@ pre_crop        = 5
 - **Reload:** the watcher also watches this file; on change the service
   recomputes the effective default profile.
 - **Reprocessing:** the config's content hash is folded into every file's
-  fingerprint (alongside `profile_version`), so editing `config.toml` causes the
+  fingerprint (alongside `profile_token`), so editing `config.toml` causes the
   reconcile pass to re-crop everything that relied on defaults.
 - **Validation / failure isolation:** unknown keys or a parse error do not crash
   the service. The service keeps using the last-known-good config (or built-in
@@ -289,7 +291,6 @@ Operational settings, kept off the drive because a bad value could break the
 daemon:
 
 - `root`: local mirror root containing `config.toml` + `upload/processed/failed`.
-- `profile_version`: integer (bumped when built-in code defaults change).
 - `stability_seconds`, `process_timeout_seconds`, `worker_count`.
 - `max_input_bytes`: inputs larger than this go straight to `failed/` with a log.
 - `retry_backoff`: bounds for retrying environmental failures.
@@ -360,7 +361,8 @@ client side (NixOS module), not in this service.
   permanently suppressing.
 - **Idempotency:** re-running over an unchanged tree produces no new work;
   editing a sidecar reprocesses only that file; editing the drive `config.toml`,
-  bumping `profile_version`, or a changed `tool_version` reprocesses all.
+  changing built-in defaults (`profile_token`), or a changed `tool_version`
+  reprocesses all.
 - **Config robustness:** a malformed `config.toml` leaves processing on the
   last-known-good profile and produces `config.error.log`; fixing it clears the
   error and reloads.

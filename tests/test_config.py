@@ -10,7 +10,6 @@ def test_server_config_defaults(tmp_path):
     cfg_path.write_text('root = "/srv/ScribeCrop"\n')
     cfg = load_server_config(cfg_path)
     assert cfg.root == Path("/srv/ScribeCrop")
-    assert cfg.profile_version == 1
     assert cfg.worker_count == 1
     assert cfg.stability_seconds == 5.0
     assert cfg.upload_dir == Path("/srv/ScribeCrop/upload")
@@ -23,7 +22,6 @@ def test_server_config_overrides(tmp_path):
     cfg_path = tmp_path / "server.toml"
     cfg_path.write_text(
         'root = "/srv/x"\n'
-        "profile_version = 7\n"
         "worker_count = 3\n"
         "max_input_bytes = 1024\n"
         'state_path = "/var/state.db"\n'
@@ -33,7 +31,6 @@ def test_server_config_overrides(tmp_path):
         "multiplier = 3\n"
     )
     cfg = load_server_config(cfg_path)
-    assert cfg.profile_version == 7
     assert cfg.worker_count == 3
     assert cfg.max_input_bytes == 1024
     assert cfg.resolved_state_path == Path("/var/state.db")

@@ -69,7 +69,7 @@ def compute_fingerprint(
     sidecar_bytes: bytes | None,
     drive_config_bytes: bytes,
     tool_version: ToolVersion,
-    profile_version: int,
+    profile_token: str,
 ) -> str:
     h = hashlib.sha256()
     if pdf_bytes is None:
@@ -79,7 +79,7 @@ def compute_fingerprint(
     h.update(_digest_part("sidecar", sidecar_bytes))
     h.update(_digest_part("config", drive_config_bytes))
     h.update(_digest_part("tool", tool_version.as_token().encode("utf-8")))
-    h.update(_digest_part("profile_version", str(profile_version).encode("utf-8")))
+    h.update(_digest_part("profile", profile_token.encode("utf-8")))
     return h.hexdigest()
 
 
@@ -89,7 +89,7 @@ def compute_oversize_fingerprint(
     sidecar_bytes: bytes | None,
     drive_config_bytes: bytes,
     tool_version: ToolVersion,
-    profile_version: int,
+    profile_token: str,
 ) -> str:
     # Oversize rejection is a server-config (operational) condition, not a
     # property of the PDF bytes. We key it off the size rather than hashing the
@@ -102,5 +102,5 @@ def compute_oversize_fingerprint(
     h.update(_digest_part("sidecar", sidecar_bytes))
     h.update(_digest_part("config", drive_config_bytes))
     h.update(_digest_part("tool", tool_version.as_token().encode("utf-8")))
-    h.update(_digest_part("profile_version", str(profile_version).encode("utf-8")))
+    h.update(_digest_part("profile", profile_token.encode("utf-8")))
     return h.hexdigest()
