@@ -30,7 +30,13 @@
 
         build-system = [pkgs.python314Packages.hatchling];
 
-        dependencies = [pkgs.python314Packages.watchdog];
+        # pdfCropMargins is a Python import of the crop shim (it monkeypatches
+        # main_pdfCropMargins.get_bounding_box_list), so it must be on the import
+        # path, not just PATH; it propagates the PyMuPDF the shim reads through.
+        dependencies = [
+          pkgs.python314Packages.watchdog
+          pdfcropmargins
+        ];
 
         # gs is added explicitly: the service probes `gs --version` itself, and
         # the pdfcropmargins wrapper only exposes gs to its own children.

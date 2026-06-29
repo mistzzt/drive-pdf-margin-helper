@@ -60,7 +60,18 @@ threshold        = 191           # -t BYTEVAL      (background detection thresho
 use_ghostscript  = true          # -gs            (ghostscript bbox detection)
 pages            = "2-"          # -g PAGESTR      (restrict cropped pages)
 password         = "secret"      # -pw PASSWD      (encrypted input)
+strip_header_footer = true       # trim running header/footer (default false)
 ```
+
+`strip_header_footer` is opt-in (default `false`) and is the one key that is not
+a `pdfcropmargins` flag: it tells the helper to also detect and trim the running
+header (conference/journal line, running title) and footer (page number) that
+`pdfcropmargins` leaves in place because they are real ink, not whitespace. The
+trim is part of the same lossless crop (CropBox/MediaBox only, no re-render) and
+is conservative: it abstains and trims nothing whenever it is not confident, so a
+paper with no running header, a title page, or a page with a figure at the top is
+never damaged. Detection is text-agnostic (geometry, not text content), so
+verso/recto alternation and changing page numbers do not defeat it.
 
 Example global `config.toml`:
 

@@ -32,7 +32,20 @@ FLAG_MAP: dict[str, FlagSpec] = {
     "password": FlagSpec("-pw", FlagKind.STR),
 }
 
-PROFILE_KEYS = frozenset(FLAG_MAP)
+# Keys validated/merged like flags but not emitted to argv; directives for the shim.
+SHIM_DIRECTIVE_MAP: dict[str, FlagKind] = {
+    "strip_header_footer": FlagKind.BOOL,
+}
+
+# Every recognized profile key, flag or directive. One validate/coerce/merge
+# path covers both; only FLAG_MAP keys reach profile_to_argv.
+PROFILE_KEYS = frozenset(FLAG_MAP) | frozenset(SHIM_DIRECTIVE_MAP)
+
+
+def _kind_of(key: str) -> FlagKind:
+    if key in FLAG_MAP:
+        return FLAG_MAP[key].kind
+    return SHIM_DIRECTIVE_MAP[key]
 
 
 class UnknownProfileKey(ValueError):
@@ -51,6 +64,8 @@ class CropProfile:
     use_ghostscript: bool = False
     pages: str | None = None
     password: str | None = None
+    # Shim directive (not a pdfcropmargins flag).
+    strip_header_footer: bool = False
 
     @classmethod
     def from_mapping(cls, data: dict[str, object]) -> CropProfile:
@@ -60,8 +75,7 @@ class CropProfile:
         result: dict[str, object] = {}
         for f in fields(self):
             value = getattr(self, f.name)
-            spec = FLAG_MAP[f.name]
-            if spec.kind is FlagKind.BOOL:
+            if _kind_of(f.name) is FlagKind.BOOL:
                 if value:
                     result[f.name] = True
             elif value is not None:
@@ -75,30 +89,30 @@ def _is_number(value: object) -> bool:
 
 
 def _coerce(key: str, value: object) -> object:
-    spec = FLAG_MAP[key]
-    if spec.kind is FlagKind.QUAD:
+    kind = _kind_of(key)
+    if kind is FlagKind.QUAD:
         if not isinstance(value, (list, tuple)) or len(value) != 4:
             raise ValueError(f"{key} must be a list of 4 numbers (L B R T)")
         if not all(_is_number(v) for v in value):
             raise ValueError(f"{key} elements must be numbers (L B R T)")
         return tuple(value)
-    if spec.kind is FlagKind.BOOL:
+    if kind is FlagKind.BOOL:
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be a boolean")
         return value
-    if spec.kind is FlagKind.INT:
+    if kind is FlagKind.INT:
         if not isinstance(value, int) or isinstance(value, bool):
             raise ValueError(f"{key} must be an integer")
         return value
-    if spec.kind is FlagKind.FLOAT:
+    if kind is FlagKind.FLOAT:
         if not _is_number(value):
             raise ValueError(f"{key} must be a number")
         return value
-    if spec.kind is FlagKind.STR:
+    if kind is FlagKind.STR:
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
         return value
-    raise AssertionError(f"unhandled flag kind: {spec.kind}")
+    raise AssertionError(f"unhandled flag kind: {kind}")
 
 
 def validate_and_coerce(data: dict[str, object]) -> dict[str, object]:
