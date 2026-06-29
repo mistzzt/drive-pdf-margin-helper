@@ -5,6 +5,17 @@ from .config import (
     load_drive_config,
     load_server_config,
 )
+from .crop_shim import make_bbox_wrapper, run_crop
+from .detector import (
+    DEFAULT_PARAMS,
+    DETECTOR_VERSION,
+    DetectionResult,
+    DetectorParams,
+    EdgeCut,
+    PageText,
+    detect_bands,
+    page_text_from_mupdf,
+)
 from .fingerprint import ToolVersion, compute_fingerprint, probe_tool_version
 from .processor import (
     BinaryNotFound,
@@ -38,14 +49,20 @@ from .watcher import EventTarget, UploadEventRouter, WatchEvent, Watcher
 
 __all__ = [
     "BUILTIN_PROFILE",
+    "DEFAULT_PARAMS",
+    "DETECTOR_VERSION",
     "FLAG_MAP",
     "BinaryNotFound",
     "CropProfile",
+    "DetectionResult",
+    "DetectorParams",
     "DriveConfigResult",
+    "EdgeCut",
     "EventTarget",
     "MirrorReadiness",
     "Outcome",
     "OutOfMemory",
+    "PageText",
     "ProcessResult",
     "ReconcileReport",
     "ResultKind",
@@ -63,15 +80,19 @@ __all__ = [
     "Watcher",
     "classify_run_failure",
     "compute_fingerprint",
+    "detect_bands",
     "forward_pass",
     "iter_upload_pdfs",
     "load_drive_config",
     "load_server_config",
+    "make_bbox_wrapper",
     "merge_profiles",
+    "page_text_from_mupdf",
     "probe_tool_version",
     "process_pdf",
     "profile_to_argv",
     "reconcile",
     "reverse_gc",
+    "run_crop",
     "subprocess_runner",
 ]

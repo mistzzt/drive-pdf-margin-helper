@@ -5,11 +5,16 @@ description = "Auto-crop PDF margins from a OneDrive folder for reading on a Kin
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    # pdfcropmargins is imported at runtime by the crop shim (scribe_crop.crop_shim),
+    # not just shelled out to. It pulls in PyMuPDF, which the shim reaches only
+    # through the page objects pdfcropmargins hands it (no direct import of our own).
+    "pdfcropmargins>=2.2.1",
     "watchdog>=6.0.0",
 ]
 
 [project.scripts]
 scribe-crop = "scribe_crop.cli:main"
+scribe-crop-shim = "scribe_crop.crop_shim:main"
 
 [build-system]
 requires = ["hatchling"]

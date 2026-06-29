@@ -130,3 +130,33 @@ def test_quad_must_have_four():
 def test_bool_must_be_bool():
     with pytest.raises(ValueError):
         CropProfile.from_mapping({"uniform": "yes"})
+
+
+def test_strip_header_footer_not_emitted_as_flag():
+    profile = CropProfile.from_mapping(
+        {"strip_header_footer": True, "percent_retain": 8}
+    )
+    argv = profile_to_argv(profile)
+    # The directive never reaches the pdfcropmargins argv.
+    assert "strip_header_footer" not in " ".join(argv)
+    assert "--strip-header-footer" not in argv
+    assert argv == ["-p", "8"]
+    assert profile.strip_header_footer is True
+
+
+def test_strip_header_footer_defaults_off():
+    assert BUILTIN_PROFILE.strip_header_footer is False
+
+
+def test_strip_header_footer_merges_with_precedence():
+    merged = merge_profiles(
+        BUILTIN_PROFILE,
+        drive_config={"strip_header_footer": True},
+        sidecar={"strip_header_footer": False},
+    )
+    assert merged.strip_header_footer is False  # sidecar wins
+
+
+def test_strip_header_footer_must_be_bool():
+    with pytest.raises(ValueError):
+        CropProfile.from_mapping({"strip_header_footer": "yes"})

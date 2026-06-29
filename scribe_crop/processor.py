@@ -11,6 +11,13 @@ from enum import Enum
 from pathlib import Path
 
 from .config import ServerConfig
+from .crop_shim import (
+    CONTENT_STDERR_PATTERNS as _CONTENT_STDERR_PATTERNS,
+    STRIP_FLAG,
+    _CONTENT_MARKER as _SHIM_CONTENT_MARKER,
+    _ENV_MARKER as _SHIM_ENV_MARKER,
+)
+from .detector import DEFAULT_PARAMS
 from .fingerprint import (
     ToolVersion,
     compute_fingerprint,
@@ -84,30 +91,16 @@ def subprocess_runner(argv: list[str], timeout: float) -> RunResult:
     return RunResult(proc.returncode, proc.stdout or "", proc.stderr or "")
 
 
-# stderr substrings that mark a content (input-bound) failure: the same bytes
-# will never succeed without the user changing the input or its sidecar.
-_CONTENT_STDERR_PATTERNS = (
-    "could not be decrypted",
-    "password",
-    "encrypted",
-    "no detectable bounding box",
-    "bounding box",
-    "empty bounding box",
-    "could not be read",
-    "could not read",
-    "is not a valid pdf",
-    "error parsing",
-    "pdfreaderror",
-    "could not be repaired",
-    "failed to read",
-    "is encrypted",
-)
-
-
 def classify_run_failure(result: RunResult) -> ResultKind:
     if result.returncode == 0:
         return ResultKind.SUCCESS
     blob = result.stderr.lower()
+    # Shim markers are authoritative: a detector/library traceback containing a
+    # content word like "bounding box" must not be misread as a suppression.
+    if _SHIM_ENV_MARKER.lower() in blob:
+        return ResultKind.ENVIRONMENTAL_FAILURE
+    if _SHIM_CONTENT_MARKER.lower() in blob:
+        return ResultKind.CONTENT_FAILURE
     if any(pat in blob for pat in _CONTENT_STDERR_PATTERNS):
         return ResultKind.CONTENT_FAILURE
     # Unrecognized nonzero exit is environmental (retryable) per the design.
@@ -258,12 +251,17 @@ def process_pdf(
         )
 
     profile_argv = profile_to_argv(profile)
+    # Folded into the fingerprint and command only when enabled, so a disabled
+    # file keeps today's argv-only key and does not re-crop on rollout.
+    strip = profile.strip_header_footer
+    strip_token = DEFAULT_PARAMS.token() if strip else None
     pdf_bytes = input_pdf.read_bytes()
     fp = fingerprint_fn(
         input_pdf,
         pdf_bytes=pdf_bytes,
         profile_token=" ".join(profile_argv),
         tool_version=tool_version,
+        strip_token=strip_token,
     )
 
     record = store.get(relpath)
@@ -275,7 +273,11 @@ def process_pdf(
 
     temp_out = _mkstemp_in(config.tmp_dir)
 
-    argv = [binary, *profile_argv, "-o", str(temp_out), str(input_pdf)]
+    # `binary` is the crop shim (it wraps pdfcropmargins). When stripping is on
+    # we pass our directive flag; otherwise the shim is a pass-through and the
+    # remaining argv is exactly what a direct pdfcropmargins call would receive.
+    strip_flag = [STRIP_FLAG] if strip else []
+    argv = [binary, *strip_flag, *profile_argv, "-o", str(temp_out), str(input_pdf)]
 
     try:
         try:

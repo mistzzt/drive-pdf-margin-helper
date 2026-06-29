@@ -17,13 +17,15 @@ its native OneDrive integration.
 | Drive provider | OneDrive | Best server ergonomics on NixOS: the abraunegg `onedrive` client has native `--monitor` (inotify) sync, simpler OAuth than Google Drive, and a first-class NixOS module. |
 | Detection | Near-realtime | `onedrive --monitor` keeps a local mirror in sync both ways; a separate inotify watcher on the local `upload/` dir triggers processing within seconds. |
 | Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Vendored at `nix/pdfcropmargins.nix`. |
+| Crop invocation | Via a crop shim (`scribe-crop-shim`) | The service shells out to our shim, which imports and drives `pdfcropmargins`' public `crop()`. Disabled, it is bit-for-bit the bare tool for the same argv; enabled, it composes the header/footer strip into the same single crop. Keeps the subprocess isolation (timeout / OOM / native-crash containment) the daemon relies on. |
+| Header/footer strip | Opt-in, default off | Detect and trim running headers/footers losslessly (box rewrite only) by cross-page positional recurrence, abstaining whenever not confident. First profile key that is a shim directive, not a `pdfcropmargins` flag. See `docs/header-footer-strip.md`. |
 | Crop config | Auto-crop default + per-file sidecar overrides | One sensible profile for everything; optional `<name>.pdf.toml` sidecar for documents that need tuning. |
 | Originals | Non-destructive | Original stays in `upload/`; cropped copy written to `processed/` at the same relative path. Re-runnable if settings change. |
 | Output integrity | Atomic publish | Outputs are written to a temp file and atomically renamed into place; the processor is the sole writer of `processed/`/`failed/`. Prevents the sync client uploading half-written files or creating conflict copies. |
 | Deletions | Mirror into outputs | Removing a source from `upload/` causes its `processed/`/`failed/` outputs to be removed on the next reconcile, so the Scribe library and `processed/` don't accumulate orphans. |
 | Failures | Move to `failed/` + log | Failed inputs go to `failed/` with a `.log`; visible from the drive/Scribe side, keeps `upload/` clean. |
 | Implementation | Python | `pdfcropmargins` is Python; clean config parsing, retries, structured logging, inotify via `watchdog`. |
-| Python deps | `uv` | Project managed with `uv` (lockfile, venv). System deps (`pdfcropmargins`, `onedrive`, `ghostscript`) come from Nix. |
+| Python deps | `uv` | Project managed with `uv` (lockfile, venv). `pdfcropmargins` is now a declared Python runtime dependency (the shim imports it, not just shells out) and pulls in PyMuPDF transitively. `onedrive`/`ghostscript` and the `pdfcropmargins` binary still come from Nix. |
 | Deployment | NixOS | `services.onedrive` module + a systemd service for the watcher. |
 
 ## Architecture
@@ -54,7 +56,10 @@ Two cooperating daemons on the server:
 
 2. **`scribe-crop`** (this project): watches the local `upload/` dir, crops new
    or changed PDFs, and writes outputs to the local `processed/` or `failed/`
-   dirs. It never talks to OneDrive directly; the mirror is its whole world.
+   dirs. It never talks to OneDrive directly; the mirror is its whole world. The
+   crop step shells out to a sibling console script, **`scribe-crop-shim`**,
+   which drives `pdfcropmargins` and (when enabled) the header/footer strip; the
+   subprocess boundary contains timeouts, OOM, and native crashes.
 
 This separation keeps the helper provider-agnostic in spirit (it only touches a
 local directory tree) and leans on a mature client for sync.
@@ -143,7 +148,7 @@ Scribe) can set `uniform`/`same_size` from any device via the drive
 Optional TOML file `<name>.pdf.toml` next to the source PDF. Highest precedence;
 absent keys fall back to the effective default profile (built-in defaults
 overlaid with the drive `config.toml`). Schema (keys map to `pdfcropmargins`
-flags):
+flags, except the shim directive `strip_header_footer` noted below):
 
 ```toml
 percent_retain   = 15          # -p PCT          (single value)
@@ -156,10 +161,29 @@ threshold        = 191         # -t BYTEVAL    (background detection threshold)
 use_ghostscript  = true        # -gs           (ghostscript bbox detection)
 pages            = "2-"        # -g PAGESTR    (restrict cropped pages)
 password         = "secret"    # -pw PASSWD    (encrypted input)
+strip_header_footer = true     # detect+trim running header/footer (default false)
 ```
 
 Validation: unknown keys are rejected (fail the file rather than silently
 ignore). The mapping from TOML keys to CLI flags lives in one place.
+
+`strip_header_footer` is the one profile key that is **not** a `pdfcropmargins`
+CLI flag; it is a directive to the crop shim that wraps `pdfcropmargins`. It is
+validated and merged through the same precedence path (built-in `false` < drive
+`config.toml [crop]` < per-file sidecar) but is never emitted to the
+`pdfcropmargins` argv. When on, the shim detects the document's running header
+and footer (by cross-page positional recurrence of an isolated edge line) and
+trims them as part of the same single, lossless crop, abstaining whenever it is
+not confident. See `docs/header-footer-strip.md` for the algorithm and the
+constants.
+
+Fingerprint interaction: a `DETECTOR_VERSION` plus the strip parameters are
+folded into the dedup key **only when stripping is enabled**, so a disabled file
+keeps its current key and does not re-crop on rollout. PyMuPDF (which the shim
+reads text geometry through) is deliberately **not** in the key and not a
+declared dependency: it rides transitively on `pdfcropmargins`' pinned version,
+so the existing toolchain token covers it, the same stance the whitespace crop
+already takes.
 
 ## Processing algorithm
 
@@ -183,14 +207,22 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
    A malformed sidecar/profile has no argv to fingerprint: it is not processed,
    only logged (see below).
 3. **Build the command** from the resolved argv, targeting a temp output path on
-   the same filesystem as `processed/`.
-4. **Run `pdfcropmargins`** with a timeout.
+   the same filesystem as `processed/`. The target is the crop shim
+   (`scribe-crop-shim`), not `pdfcropmargins` directly; the resolved
+   `strip_header_footer` directive is passed to the shim (and folded into the
+   fingerprint) only when enabled.
+4. **Run the crop shim** with a timeout. It drives `pdfcropmargins`' public
+   `crop()`: with strip off it is a pass-through with bit-for-bit parity, with
+   strip on it composes the header/footer trim into the same single crop.
 5. **On success:** atomically rename the temp output to `processed/<relpath>`,
    then record the fingerprint as a success. (Publish-then-record ordering: if
    we crash between the two, the next reconcile recomputes the same fingerprint
    and finds the already-published output, so at worst it re-records.) Remove any
    stale `failed/<relpath>` + log for this file.
-6. **On failure**, classify before recording:
+6. **On failure**, classify before recording. The shim emits a structured exit
+   code (content vs environmental) rather than relying on stderr scraping, so a
+   detector/PyMuPDF traceback that happens to contain a word like "bounding box"
+   is never mistaken for a permanent content suppression:
    - **Content failures** (corrupt PDF, encrypted-without-password, no detectable
      bounding box): atomically publish a copy of the original to
      `failed/<relpath>` plus `failed/<relpath>.pdf.log`, and record the failure
@@ -318,6 +350,11 @@ client side (NixOS module), not in this service.
   plus `ghostscript` on the service PATH. `pdfcropmargins` wraps `ghostscript` +
   `poppler_utils` for its own children, but the service probes `gs --version`
   directly for the fingerprint, so `ghostscript` is on the service PATH too.
+  `pdfcropmargins` is also a Python import dependency of the package (it propagates
+  the PyMuPDF the shim reads through), so it is on the import path, not just PATH.
+- **`scribe-crop-shim`:** installed as a console script alongside `scribe-crop`
+  in the same `bin/`; the daemon resolves it on PATH or as a sibling of its own
+  entry point.
 - **`scribe-crop` service:** a systemd service running the Python app, ordered
   after the onedrive mirror is available, with the config above. Restart on
   failure.
@@ -345,9 +382,12 @@ client side (NixOS module), not in this service.
 
 - `uv` manages the Python project (deps, lockfile, venv): `uv init`, `uv add`,
   `uv run`.
-- Python dependency footprint is small: `watchdog` is the only third-party
-  runtime dep. `sqlite3` (state store) and `tomllib` (sidecar parsing) are
-  stdlib on the targeted Python 3.14.
+- Python dependency footprint is small: `watchdog` and `pdfcropmargins` are the
+  third-party runtime deps. The shim imports `pdfcropmargins`, which pulls in
+  PyMuPDF transitively; the shim only reaches PyMuPDF through the page objects
+  `pdfcropmargins` hands it (no direct import of our own), so PyMuPDF is not
+  declared. `sqlite3` (state store) and `tomllib` (sidecar parsing) are stdlib on
+  the targeted Python 3.14.
 - System tools (`pdfcropmargins`, `onedrive`, `ghostscript`) come from Nix; a
   dev shell provides them on PATH for local testing.
 - Local testing does not require OneDrive: point `root` at a scratch directory
@@ -377,6 +417,12 @@ client side (NixOS module), not in this service.
 - **Config robustness:** a malformed `config.toml` leaves processing on the
   last-known-good profile and produces `config.error.log`; fixing it clears the
   error and reloads.
+- **Header/footer strip:** with the feature off, shim output is bit-for-bit the
+  bare `pdfcropmargins` call and the fingerprint is unchanged; with it on, a
+  recurring band is trimmed while title pages, figure-top pages, and header-less
+  pages are preserved. Detector logic is unit-tested without PDFs; the shim is
+  tested against the real `pdfcropmargins`/PyMuPDF. Full criteria in
+  `docs/header-footer-strip.md`.
 - **End-to-end:** with the real OneDrive client, drop a PDF from another device,
   confirm it appears cropped in `processed/` and imports cleanly on the Scribe.
 

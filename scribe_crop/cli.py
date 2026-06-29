@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -11,18 +12,32 @@ from .service import MirrorReadiness, Service
 
 log = logging.getLogger("scribe_crop")
 
-_BINARY = "pdfcropmargins"
+# The crop step shells out to our shim (it wraps pdfcropmargins and optionally
+# strips running headers/footers), not to pdfcropmargins directly. The shim is
+# installed as a console script alongside the daemon.
+_BINARY = "scribe-crop-shim"
 
 
 class BinaryMissing(RuntimeError):
     pass
 
 
-def resolve_binary(name: str = _BINARY, *, which=shutil.which) -> str:
+def resolve_binary(
+    name: str = _BINARY, *, which=shutil.which, argv0: str | None = None
+) -> str:
     path = which(name)
-    if path is None:
-        raise BinaryMissing(f"{name} not found on PATH")
-    return path
+    if path is not None:
+        return path
+    # The shim console script is installed in the same bin directory as this
+    # daemon. When scribe-crop is launched by absolute path (e.g.
+    # ./result/bin/scribe-crop) that directory may not be on PATH, so fall back
+    # to the sibling next to our own entry point before giving up.
+    entry = argv0 if argv0 is not None else sys.argv[0]
+    if entry:
+        sibling = Path(entry).resolve().parent / name
+        if sibling.is_file() and os.access(sibling, os.X_OK):
+            return str(sibling)
+    raise BinaryMissing(f"{name} not found on PATH or next to {entry!r}")
 
 
 def _readiness(args: argparse.Namespace) -> MirrorReadiness:
@@ -76,14 +91,16 @@ def cmd_reconcile(args: argparse.Namespace, binary: str) -> int:
 _COMMANDS = {"run": cmd_run, "reconcile": cmd_reconcile}
 
 
-def main(argv: list[str] | None = None, *, which=shutil.which) -> int:
+def main(
+    argv: list[str] | None = None, *, which=shutil.which, argv0: str | None = None
+) -> int:
     args = _build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     try:
-        binary = resolve_binary(which=which)
+        binary = resolve_binary(which=which, argv0=argv0)
     except BinaryMissing as exc:
         log.error("%s", exc)
         return 2

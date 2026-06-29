@@ -18,14 +18,40 @@ def test_resolve_binary_found():
     assert cli.resolve_binary("anything", which=lambda _: "/usr/bin/pdfcropmargins") == "/usr/bin/pdfcropmargins"
 
 
-def test_resolve_binary_missing_raises():
+def test_resolve_binary_missing_raises(tmp_path):
+    # argv0 points at a directory with no sibling binary, so neither PATH nor the
+    # sibling fallback resolves it.
     with pytest.raises(cli.BinaryMissing):
-        cli.resolve_binary("pdfcropmargins", which=lambda _: None)
+        cli.resolve_binary(
+            "pdfcropmargins",
+            which=lambda _: None,
+            argv0=str(tmp_path / "scribe-crop"),
+        )
 
 
-def test_main_fails_clearly_when_binary_absent(server_config_file):
+def test_resolve_binary_sibling_fallback(tmp_path):
+    # When the shim is not on PATH but sits next to the daemon entry point (e.g.
+    # ./result/bin), it is resolved as a sibling.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "scribe-crop-shim"
+    shim.write_text("#!/bin/sh\n")
+    shim.chmod(0o755)
+    got = cli.resolve_binary(
+        "scribe-crop-shim",
+        which=lambda _: None,
+        argv0=str(bindir / "scribe-crop"),
+    )
+    assert got == str(shim)
+
+
+def test_main_fails_clearly_when_binary_absent(server_config_file, tmp_path):
     cfg, _ = server_config_file
-    rc = cli.main(["-c", str(cfg), "reconcile"], which=lambda _: None)
+    rc = cli.main(
+        ["-c", str(cfg), "reconcile"],
+        which=lambda _: None,
+        argv0=str(tmp_path / "scribe-crop"),
+    )
     assert rc == 2
 
 
