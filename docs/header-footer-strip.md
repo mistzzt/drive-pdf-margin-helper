@@ -1,10 +1,10 @@
-# Plan: Strip running headers and footers
+# Strip running headers and footers
 
-Status: proposed (reviewed). This plan defines what to build and why. It does not
-prescribe the implementation. Read `docs/design.md` first; this feature extends the
-crop step and the fingerprint, and it must preserve every invariant in that
-document and in `CLAUDE.md`. The pdfcropmargins integration claims below were
-verified against the vendored source (version 2.2.1, pinned in
+This is the algorithm spec and decision record for the header/footer strip
+feature; `docs/design.md` covers it at the system level and defers here for the
+detail. The feature extends the crop step and the fingerprint and preserves every
+invariant in that document and in `CLAUDE.md`. The pdfcropmargins integration
+claims below were verified against the vendored source (version 2.2.1, pinned in
 `nix/pdfcropmargins.nix`); file:line citations are to that source.
 
 ## Goal
@@ -272,9 +272,12 @@ directive/version), and drive the shim from that same resolution.
 
 ## Dependency and packaging
 
-- No new heavy dependency: reuse PyMuPDF from the `pdfcropmargins` closure. Declare
-  it explicitly via `uv` so the import is intentional, and ensure the Nix package
-  and dev shell expose it to the shim.
+- No new dependency. PyMuPDF is reused from the `pdfcropmargins` closure but is
+  **not** declared and **not** in the fingerprint: the shim reaches it only
+  through the page objects `pdfcropmargins` hands it (no direct import of our
+  own), so it rides transitively on the pinned `pdfcropmargins`. (Earlier drafts
+  declared it explicitly and folded its version into the strip key; both were
+  dropped as redundant once the only direct import was removed.)
 - The NixOS module needs no new system tool; Ghostscript and the crop toolchain are
   unchanged.
 
@@ -297,8 +300,9 @@ directive/version), and drive the shim from that same resolution.
    today.
 6. **Config + docs:** document the new key in `docs/design.md` (crop profile and
    sidecar schema) and `README.md`; default off.
-7. **Packaging:** declare PyMuPDF in `uv`; expose it in the Nix package/dev shell;
-   keep `nix build` and `nix flake check` green.
+7. **Packaging:** declare `pdfcropmargins` as a Python runtime dep (it propagates
+   PyMuPDF transitively; no separate PyMuPDF declaration); keep `nix build` and
+   `nix flake check` green.
 
 ## Acceptance criteria and verification
 
