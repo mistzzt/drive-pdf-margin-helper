@@ -37,23 +37,20 @@ outputs on the next reconcile (see the readiness-marker note below).
 
 The crop profile is layered, lowest precedence first:
 
-1. **Built-in defaults**: `-p 10` (retain 10% of existing margins). Each page is
-   cropped to its own bounding box (no `-u`/`-s`), so a page with wide margins is
-   trimmed more than a page with narrow margins instead of all pages sharing one
-   crop. Set `uniform`/`same_size` if you want a single consistent page box.
+1. **Built-in defaults**: `-p 10` (retain 10% of existing margins), one shared
+   page box per document, and a cap of 1.15x on how far a page is magnified on
+   the reader screen (see *Reader fit* below).
 2. **Global `config.toml`** at the synced root, in a `[crop]` table. Editable from
    any device; on change the service re-crops everything that relied on defaults.
 3. **Per-file sidecar** `<name>.pdf.toml` next to the source PDF in `upload/`.
    Highest precedence; absent keys fall back to the effective default profile.
 
-Both `[crop]` and the sidecar use the same keys (each maps to a `pdfcropmargins`
-flag):
+Both `[crop]` and the sidecar use the same keys. Most map to a `pdfcropmargins`
+flag; `strip_header_footer` and the `fit_*` keys are directives to the helper:
 
 ```toml
 percent_retain   = 15            # -p PCT          (single value)
 percent_retain4  = [50,20,40,10] # -p4 L B R T     (overrides percent_retain)
-uniform          = true          # -u
-same_size        = true          # -s
 absolute4        = [0,0,12,0]    # -a4 L B R T     (bp to crop; negative adds space)
 pre_crop         = 5             # -ap BP          (pre-crop before bbox detect)
 threshold        = 191           # -t BYTEVAL      (background detection threshold)
@@ -61,17 +58,49 @@ use_ghostscript  = true          # -gs            (ghostscript bbox detection)
 pages            = "2-"          # -g PAGESTR      (restrict cropped pages)
 password         = "secret"      # -pw PASSWD      (encrypted input)
 strip_header_footer = true       # trim running header/footer (default false)
+fit_reader       = true          # cap on-device magnification (default true)
+fit_max_scale    = 1.15          # the cap (default 1.15)
+fit_scope        = "document"    # "document" or "page"  (default "document")
+fit_exclude_first_page = true    # page 1 does not set the shared box (default true)
 ```
 
-`strip_header_footer` is opt-in (default `false`) and is the one key that is not
-a `pdfcropmargins` flag: it tells the helper to also detect and trim the running
-header (conference/journal line, running title) and footer (page number) that
-`pdfcropmargins` leaves in place because they are real ink, not whitespace. The
-trim is part of the same lossless crop (CropBox/MediaBox only, no re-render) and
-is conservative: it abstains and trims nothing whenever it is not confident, so a
-paper with no running header, a title page, or a page with a figure at the top is
-never damaged. Detection is text-agnostic (geometry, not text content), so
-verso/recto alternation and changing page numbers do not defeat it.
+### Header/footer strip
+
+`strip_header_footer` is opt-in (default `false`). It tells the helper to also
+detect and trim the running header (conference/journal line, running title) and
+footer (page number) that `pdfcropmargins` leaves in place because they are real
+ink, not whitespace. The trim is part of the same lossless crop (CropBox/MediaBox
+only, no re-render) and is conservative: it abstains and trims nothing whenever
+it is not confident, so a paper with no running header is never damaged, and a
+page with a figure at the top keeps its figure. Detection is text-agnostic
+(geometry, not text content), so verso/recto alternation and changing page
+numbers do not defeat it.
+
+### Reader fit
+
+PDF coordinates are physical (72 units per inch), so a cropped page's
+magnification on a fixed screen is `min(screen_width/page_width,
+screen_height/page_height)`. Cropping as tightly as possible is right for a
+letter-size paper, where that stays below 1, but wrong for a small-trim book,
+where it balloons the page past its printed size. `fit_reader` (on by default)
+caps that magnification at `fit_max_scale` (1.15) by keeping just enough margin,
+using the screen size from the server config's `[reader]` table. Letter papers
+never hit the cap and get the full crop; A5 books keep exactly enough margin to
+stay under it. Set `fit_reader = false` in a sidecar to crop a particular file as
+tightly as possible, or raise `fit_max_scale` for a book with unusually small
+type.
+
+`fit_scope = "document"` (the default) gives every page one shared box, so the
+reader's zoom does not jitter between pages. A page whose own content does not
+fit that box gets it minimally expanded for itself alone, so nothing is ever
+clipped: a full-bleed plate, a figure-top page, or a differently-sized insert
+simply deviates on its own. `fit_exclude_first_page` keeps a first-page artifact
+(an artifact-evaluation badge, a full-bleed cover) from widening the shared box
+for the rest of the document; that page deviates alone instead. Set
+`fit_scope = "page"` for per-page boxes.
+
+This replaces the old `uniform`/`same_size` keys, which are no longer accepted.
+See `docs/reader-fit.md` for the full behavior spec.
 
 Example global `config.toml`:
 
@@ -115,6 +144,11 @@ Add this flake as an input and import its module:
                 multiplier = 2.0;
                 max_attempts = 8;
               };
+              # Reader screen, for the magnification cap. Defaults to the
+              # scribe-colorsoft preset (6.6 x 8.8 in); override with a preset
+              # name or explicit inches, never both.
+              reader.device = "scribe-colorsoft";
+              # reader = { screen_width_in = 6.6; screen_height_in = 8.8; };
             };
           };
         }

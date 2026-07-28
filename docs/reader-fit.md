@@ -1,6 +1,6 @@
 # Reader-fit cropping (plan)
 
-Status: proposed, not yet implemented. This is the plan and decision record for the reader-fit feature. `docs/design.md` remains the authoritative system spec; when this feature lands, design.md gets a short section deferring here, mirroring how `docs/header-footer-strip.md` is referenced.
+Status: implemented. This is the behavior spec and decision record for the reader-fit feature; `docs/design.md` covers it at the system level and defers here for the detail. The nine-step pipeline below is normative and is implemented as the single `get_bounding_box_list` wrapper in `scribe_crop/crop_shim.py`.
 
 The project is pre-release: no backward compatibility with existing fingerprints, outputs, or config files is required, and defaults may change freely. Existing state and outputs are wiped on rollout, and a live drive `config.toml` still using removed keys will fail validation and fall back to built-in defaults with a `config.error.log` until edited.
 

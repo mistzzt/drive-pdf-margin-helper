@@ -1,11 +1,13 @@
 from .config import (
+    DEVICE_PRESETS,
     DriveConfigResult,
+    ReaderConfig,
     RetryBackoff,
     ServerConfig,
     load_drive_config,
     load_server_config,
 )
-from .crop_shim import make_bbox_wrapper, run_crop
+from .crop_shim import ReaderFit, make_bbox_wrapper, run_crop
 from .detector import (
     DEFAULT_PARAMS,
     DETECTOR_VERSION,
@@ -26,11 +28,15 @@ from .processor import (
     RunTimeout,
     classify_run_failure,
     process_pdf,
+    resolve_reader_fit,
     subprocess_runner,
 )
 from .profile import (
     BUILTIN_PROFILE,
+    DEFAULT_FIT_MAX_SCALE,
     FLAG_MAP,
+    SCOPE_DOCUMENT,
+    SCOPE_PAGE,
     CropProfile,
     UnknownProfileKey,
     merge_profiles,
@@ -49,9 +55,13 @@ from .watcher import EventTarget, UploadEventRouter, WatchEvent, Watcher
 
 __all__ = [
     "BUILTIN_PROFILE",
+    "DEFAULT_FIT_MAX_SCALE",
     "DEFAULT_PARAMS",
     "DETECTOR_VERSION",
+    "DEVICE_PRESETS",
     "FLAG_MAP",
+    "SCOPE_DOCUMENT",
+    "SCOPE_PAGE",
     "BinaryNotFound",
     "CropProfile",
     "DetectionResult",
@@ -64,6 +74,8 @@ __all__ = [
     "OutOfMemory",
     "PageText",
     "ProcessResult",
+    "ReaderConfig",
+    "ReaderFit",
     "ReconcileReport",
     "ResultKind",
     "RetryBackoff",
@@ -92,6 +104,7 @@ __all__ = [
     "process_pdf",
     "profile_to_argv",
     "reconcile",
+    "resolve_reader_fit",
     "reverse_gc",
     "run_crop",
     "subprocess_runner",

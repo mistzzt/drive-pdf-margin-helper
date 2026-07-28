@@ -13,7 +13,9 @@ from pathlib import Path
 from .config import ServerConfig
 from .crop_shim import (
     CONTENT_STDERR_PATTERNS as _CONTENT_STDERR_PATTERNS,
+    FIT_FLAG,
     STRIP_FLAG,
+    ReaderFit,
     _CONTENT_MARKER as _SHIM_CONTENT_MARKER,
     _ENV_MARKER as _SHIM_ENV_MARKER,
 )
@@ -25,6 +27,9 @@ from .fingerprint import (
 )
 from .profile import (
     BUILTIN_PROFILE,
+    DEFAULT_FIT_MAX_SCALE,
+    SCOPE_DOCUMENT,
+    CropProfile,
     UnknownProfileKey,
     merge_profiles,
     profile_to_argv,
@@ -170,6 +175,23 @@ def _failed_log_path(failed_pdf: Path) -> Path:
     return failed_pdf.with_name(failed_pdf.name + ".log")
 
 
+def resolve_reader_fit(profile: CropProfile, config: ServerConfig) -> ReaderFit:
+    """The one place the profile's fit_* knobs meet the server's screen geometry;
+    the result drives both the shim directive and the fingerprint."""
+    return ReaderFit(
+        scope=profile.fit_scope or SCOPE_DOCUMENT,
+        reader=profile.fit_reader,
+        exclude_first_page=profile.fit_exclude_first_page,
+        screen_w_pt=config.reader.screen_width_pt,
+        screen_h_pt=config.reader.screen_height_pt,
+        max_scale=(
+            profile.fit_max_scale
+            if profile.fit_max_scale is not None
+            else DEFAULT_FIT_MAX_SCALE
+        ),
+    )
+
+
 def process_pdf(
     relpath: str,
     *,
@@ -252,9 +274,13 @@ def process_pdf(
 
     profile_argv = profile_to_argv(profile)
     # Folded into the fingerprint and command only when enabled, so a disabled
-    # file keeps today's argv-only key and does not re-crop on rollout.
+    # file keeps the argv-only key and does not re-crop on rollout.
     strip = profile.strip_header_footer
     strip_token = DEFAULT_PARAMS.token() if strip else None
+    # One resolution drives the directive, the fingerprint, and the command,
+    # so the recorded key always describes the crop that ran.
+    fit = resolve_reader_fit(profile, config)
+    fit_token = fit.token()
     pdf_bytes = input_pdf.read_bytes()
     fp = fingerprint_fn(
         input_pdf,
@@ -262,6 +288,7 @@ def process_pdf(
         profile_token=" ".join(profile_argv),
         tool_version=tool_version,
         strip_token=strip_token,
+        fit_token=fit_token,
     )
 
     record = store.get(relpath)
@@ -273,11 +300,12 @@ def process_pdf(
 
     temp_out = _mkstemp_in(config.tmp_dir)
 
-    # `binary` is the crop shim (it wraps pdfcropmargins). When stripping is on
-    # we pass our directive flag; otherwise the shim is a pass-through and the
-    # remaining argv is exactly what a direct pdfcropmargins call would receive.
-    strip_flag = [STRIP_FLAG] if strip else []
-    argv = [binary, *strip_flag, *profile_argv, "-o", str(temp_out), str(input_pdf)]
+    # `binary` is the crop shim; directives are leading tokens, and with every
+    # feature off the remaining argv is a direct pdfcropmargins call.
+    directives = [STRIP_FLAG] if strip else []
+    if fit.active:
+        directives += [FIT_FLAG, fit_token]
+    argv = [binary, *directives, *profile_argv, "-o", str(temp_out), str(input_pdf)]
 
     try:
         try:

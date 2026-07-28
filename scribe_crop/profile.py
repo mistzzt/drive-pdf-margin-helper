@@ -10,6 +10,7 @@ class FlagKind(Enum):
     FLOAT = "float"
     STR = "str"
     QUAD = "quad"
+    ENUM = "enum"
 
 
 @dataclass(frozen=True)
@@ -18,12 +19,11 @@ class FlagSpec:
     kind: FlagKind
 
 
-# Single source of truth: profile key -> pdfcropmargins CLI flag.
+# Profile key -> pdfcropmargins flag. Crop-list post-processors (-u/-m*, -s/-ms,
+# --cropSafe, --setPageRatios, --centerText, even/odd) would break as-is injection.
 FLAG_MAP: dict[str, FlagSpec] = {
     "percent_retain": FlagSpec("-p", FlagKind.FLOAT),
     "percent_retain4": FlagSpec("-p4", FlagKind.QUAD),
-    "uniform": FlagSpec("-u", FlagKind.BOOL),
-    "same_size": FlagSpec("-s", FlagKind.BOOL),
     "absolute4": FlagSpec("-a4", FlagKind.QUAD),
     "pre_crop": FlagSpec("-ap", FlagKind.FLOAT),
     "threshold": FlagSpec("-t", FlagKind.INT),
@@ -35,7 +35,22 @@ FLAG_MAP: dict[str, FlagSpec] = {
 # Keys validated/merged like flags but not emitted to argv; directives for the shim.
 SHIM_DIRECTIVE_MAP: dict[str, FlagKind] = {
     "strip_header_footer": FlagKind.BOOL,
+    "fit_reader": FlagKind.BOOL,
+    "fit_max_scale": FlagKind.FLOAT,
+    "fit_scope": FlagKind.ENUM,
+    "fit_exclude_first_page": FlagKind.BOOL,
 }
+
+# Allowed values for each ENUM-kind key.
+ENUM_VALUES: dict[str, frozenset[str]] = {
+    "fit_scope": frozenset({"document", "page"}),
+}
+
+SCOPE_DOCUMENT = "document"
+SCOPE_PAGE = "page"
+
+# Default on-device magnification cap for the reader-fit floor.
+DEFAULT_FIT_MAX_SCALE = 1.15
 
 # Every recognized profile key, flag or directive. One validate/coerce/merge
 # path covers both; only FLAG_MAP keys reach profile_to_argv.
@@ -56,16 +71,18 @@ class UnknownProfileKey(ValueError):
 class CropProfile:
     percent_retain: float | None = None
     percent_retain4: tuple[float, float, float, float] | None = None
-    uniform: bool = False
-    same_size: bool = False
     absolute4: tuple[float, float, float, float] | None = None
     pre_crop: float | None = None
     threshold: int | None = None
     use_ghostscript: bool = False
     pages: str | None = None
     password: str | None = None
-    # Shim directive (not a pdfcropmargins flag).
+    # Shim directives (not pdfcropmargins flags).
     strip_header_footer: bool = False
+    fit_reader: bool = True
+    fit_max_scale: float | None = None
+    fit_scope: str | None = None
+    fit_exclude_first_page: bool = True
 
     @classmethod
     def from_mapping(cls, data: dict[str, object]) -> CropProfile:
@@ -76,8 +93,9 @@ class CropProfile:
         for f in fields(self):
             value = getattr(self, f.name)
             if _kind_of(f.name) is FlagKind.BOOL:
-                if value:
-                    result[f.name] = True
+                # Bools always round-trip: a directive bool defaulting to True
+                # (fit_reader) must survive to_dict/merge, not be dropped as falsy.
+                result[f.name] = bool(value)
             elif value is not None:
                 result[f.name] = value
         return result
@@ -107,10 +125,17 @@ def _coerce(key: str, value: object) -> object:
     if kind is FlagKind.FLOAT:
         if not _is_number(value):
             raise ValueError(f"{key} must be a number")
+        if key == "fit_max_scale" and value <= 0:
+            raise ValueError("fit_max_scale must be > 0")
         return value
     if kind is FlagKind.STR:
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
+        return value
+    if kind is FlagKind.ENUM:
+        allowed = ENUM_VALUES[key]
+        if not isinstance(value, str) or value not in allowed:
+            raise ValueError(f"{key} must be one of: {', '.join(sorted(allowed))}")
         return value
     raise AssertionError(f"unhandled flag kind: {kind}")
 
@@ -165,7 +190,8 @@ def profile_to_argv(profile: CropProfile) -> list[str]:
         spec = FLAG_MAP[key]
         value = effective[key]
         if spec.kind is FlagKind.BOOL:
-            argv.append(spec.flag)
+            if value:
+                argv.append(spec.flag)
         elif spec.kind is FlagKind.QUAD:
             argv.append(spec.flag)
             argv.extend(str(_fmt(v)) for v in value)  # type: ignore[union-attr]
@@ -181,4 +207,10 @@ def _fmt(value: object) -> object:
     return value
 
 
-BUILTIN_PROFILE = CropProfile(uniform=False, same_size=False, percent_retain=10)
+BUILTIN_PROFILE = CropProfile(
+    percent_retain=10,
+    fit_reader=True,
+    fit_max_scale=DEFAULT_FIT_MAX_SCALE,
+    fit_scope=SCOPE_DOCUMENT,
+    fit_exclude_first_page=True,
+)

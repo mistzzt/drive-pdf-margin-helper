@@ -1,21 +1,11 @@
-"""Crop shim: run pdfcropmargins, optionally stripping running headers/footers.
-
-The service shells out to this in place of the ``pdfcropmargins`` console
-script. Disabled, it installs no patch and calls ``crop()`` so output is
-bit-for-bit the bare tool. Enabled, it monkeypatches
-``main_pdfCropMargins.get_bounding_box_list`` (only for the one crop) with a
-wrapper that runs the detector and tightens each page's box to exclude the band,
-then lets the normal crop math and save run once.
-
-Exit codes are structured so the service classifies without scraping tracebacks:
-0 success, 2 content failure (suppress on identical bytes), 3 environmental
-(retry, never suppress).
-"""
+"""Crop shim: wrap one pdfcropmargins crop, composing header/footer strip and
+reader-fit into final per-page boxes that the tool publishes as-is."""
 
 from __future__ import annotations
 
 import sys
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from .detector import (
     DEFAULT_PARAMS,
@@ -24,12 +14,22 @@ from .detector import (
     page_band_inner_dists,
     page_text_from_mupdf,
 )
+from .profile import SCOPE_DOCUMENT, SCOPE_PAGE
 
 STRIP_FLAG = "--strip-header-footer"  # leading token the processor prepends
+FIT_FLAG = "--reader-fit"  # leading token plus one payload token
 
 EXIT_SUCCESS = 0
 EXIT_CONTENT = 2
 EXIT_ENVIRONMENTAL = 3
+
+# Page boxes within this tolerance (bp) count as the same modal size,
+# absorbing scanner jitter. A fixed algorithm constant, not user config.
+COHORT_SIZE_TOLERANCE = 2.0
+
+# 90/270 pages are saved unrotated but displayed transposed, so they can never
+# share a box with these rotations.
+_UPRIGHT_ROTATIONS = (0, 180)
 
 # Distinct from pdfcropmargins' own messages so the service classifies on the
 # marker, not on incidental words in a traceback.
@@ -56,51 +56,194 @@ CONTENT_STDERR_PATTERNS = (
     "is encrypted",
 )
 
-
-def _tighten_top(
-    f_bottom: float, f_top: float, b_top: float, cut: float, p_top: float, a_top: float
-) -> float:
-    """Invert pdfcropmargins' top expansion so the final top lands at ``cut``.
-
-    Final top is ``f_top - (f_top - b_top)*(1 - p/100) - a_top``, so
-    ``b_top = f_top - (f_top - cut - a_top)/(1 - p/100)``. Out of the page box
-    (large retain, or p>=100) signals the caller to fall back to retain 0.
-    """
-    scale = 1.0 - p_top / 100.0
-    if scale <= 0.0:
-        raise _PreCompUnavailable
-    b = f_top - (f_top - cut - a_top) / scale
-    if not (f_bottom <= b <= f_top):
-        raise _PreCompUnavailable
-    return b
+Box = list[float]
+Quad = Sequence[float]
 
 
-def _tighten_bottom(
-    f_bottom: float, f_top: float, b_bottom: float, cut: float, p_bottom: float, a_bottom: float
-) -> float:
-    """Invert pdfcropmargins' bottom expansion so the final bottom lands at ``cut``.
+@dataclass(frozen=True)
+class ReaderFit:
+    """Resolved reader-fit parameters for one crop; screen dimensions in points."""
 
-    Final bottom is ``f_bottom + (b_bottom - f_bottom)*(1 - p/100) + a_bottom``, so
-    ``b_bottom = f_bottom + (cut - f_bottom - a_bottom)/(1 - p/100)``. Out of the
-    page box signals the caller to fall back to retain 0.
-    """
-    scale = 1.0 - p_bottom / 100.0
-    if scale <= 0.0:
-        raise _PreCompUnavailable
-    b = f_bottom + (cut - f_bottom - a_bottom) / scale
-    if not (f_bottom <= b <= f_top):
-        raise _PreCompUnavailable
-    return b
+    scope: str = SCOPE_PAGE
+    reader: bool = False
+    exclude_first_page: bool = True
+    screen_w_pt: float = 0.0
+    screen_h_pt: float = 0.0
+    max_scale: float = 1.0
+
+    @property
+    def active(self) -> bool:
+        """False iff the pipeline would reduce to pdfcropmargins' native
+        behavior, in which case the wrapper need not be installed."""
+        return self.reader or self.scope == SCOPE_DOCUMENT
+
+    def token(self) -> str:
+        """Serialize as both the directive payload and the fingerprint
+        contribution, folding only parameters that can change the output."""
+        parts = [f"scope={self.scope}", f"reader={1 if self.reader else 0}"]
+        if self.scope == SCOPE_DOCUMENT:
+            parts.append(f"first={1 if self.exclude_first_page else 0}")
+        if self.reader:
+            parts.append(f"sw={self.screen_w_pt!r}")
+            parts.append(f"sh={self.screen_h_pt!r}")
+            parts.append(f"max={self.max_scale!r}")
+        return ";".join(parts)
+
+    @classmethod
+    def parse(cls, token: str) -> ReaderFit:
+        data: dict[str, str] = {}
+        for item in token.split(";"):
+            if not item:
+                continue
+            key, _, value = item.partition("=")
+            data[key] = value
+        scope = data.get("scope", SCOPE_PAGE)
+        if scope not in (SCOPE_DOCUMENT, SCOPE_PAGE):
+            raise ValueError(f"bad reader-fit scope: {scope!r}")
+        return cls(
+            scope=scope,
+            reader=data.get("reader") == "1",
+            exclude_first_page=data.get("first", "1") == "1",
+            screen_w_pt=float(data.get("sw", 0.0)),
+            screen_h_pt=float(data.get("sh", 0.0)),
+            max_scale=float(data.get("max", 1.0)),
+        )
 
 
-class _PreCompUnavailable(Exception):
-    """Pre-compensation would push the injected edge out of range."""
+def rotate_quad(quad: Quad, angle: int) -> list[float]:
+    """Permute an [L, B, R, T] quad by a page rotation, exactly as
+    pdfcropmargins' ``mod_box_for_rotation`` does."""
+    values = list(quad)
+    turns = {0: 0, 90: 1, 180: 2, 270: 3}.get(int(angle) % 360, 0)
+    for _ in range(turns):
+        values = [values[1], values[2], values[3], values[0]]
+    return values
+
+
+def content_box(
+    tight: Sequence[float],
+    page: Sequence[float],
+    *,
+    percent_retain4: Quad,
+    absolute4: Quad,
+    rotation: int = 0,
+    top_cut: float | None = None,
+    bottom_cut: float | None = None,
+) -> Box:
+    """Step 3: the box a page must at minimum receive. Order is load-bearing:
+    rotate the quads, scale the retain, add the offset, then clamp to the cut."""
+    rp = rotate_quad(percent_retain4, rotation)
+    ra = rotate_quad(absolute4, rotation)
+    box: Box = [
+        page[0] + abs(tight[0] - page[0]) * (1.0 - rp[0] / 100.0) + ra[0],
+        page[1] + abs(tight[1] - page[1]) * (1.0 - rp[1] / 100.0) + ra[1],
+        page[2] - abs(tight[2] - page[2]) * (1.0 - rp[2] / 100.0) - ra[2],
+        page[3] - abs(tight[3] - page[3]) * (1.0 - rp[3] / 100.0) - ra[3],
+    ]
+    if top_cut is not None:
+        box[3] = min(box[3], top_cut)
+    if bottom_cut is not None:
+        box[1] = max(box[1], bottom_cut)
+    return box
+
+
+def modal_page_size(
+    sizes: Sequence[tuple[float, float]], tolerance: float = COHORT_SIZE_TOLERANCE
+) -> tuple[float, float] | None:
+    """The unique most-common (width, height) within ``tolerance``; ``None`` on
+    a tie, which degrades the document to page scope rather than guessing."""
+    buckets: list[tuple[tuple[float, float], int]] = []
+    for size in sizes:
+        for index, (rep, count) in enumerate(buckets):
+            if abs(rep[0] - size[0]) <= tolerance and abs(rep[1] - size[1]) <= tolerance:
+                buckets[index] = (rep, count + 1)
+                break
+        else:
+            buckets.append((size, 1))
+    if not buckets:
+        return None
+    best = max(count for _, count in buckets)
+    winners = [rep for rep, count in buckets if count == best]
+    return winners[0] if len(winners) == 1 else None
+
+
+def union_boxes(boxes: Sequence[Sequence[float]]) -> Box:
+    """Max extent per edge."""
+    return [
+        min(b[0] for b in boxes),
+        min(b[1] for b in boxes),
+        max(b[2] for b in boxes),
+        max(b[3] for b in boxes),
+    ]
+
+
+def apply_floor(
+    box: Sequence[float], screen_w: float, screen_h: float, max_scale: float
+) -> Box:
+    """Step 6: when ``min(screen_w/w, screen_h/h)`` exceeds the cap, grow only
+    the binding (smaller-ratio) dimension to screen/max_scale, symmetrically."""
+    out: Box = list(box)
+    width = out[2] - out[0]
+    height = out[3] - out[1]
+    if width <= 0.0 or height <= 0.0:
+        return out
+    ratio_w = screen_w / width
+    ratio_h = screen_h / height
+    if min(ratio_w, ratio_h) <= max_scale:
+        return out
+    if ratio_w <= ratio_h:  # width binds; ties grow the width
+        new_width = screen_w / max_scale
+        centre = (out[0] + out[2]) / 2.0
+        out[0] = centre - new_width / 2.0
+        out[2] = centre + new_width / 2.0
+    else:
+        new_height = screen_h / max_scale
+        centre = (out[1] + out[3]) / 2.0
+        out[1] = centre - new_height / 2.0
+        out[3] = centre + new_height / 2.0
+    return out
+
+
+def place_box(
+    box: Sequence[float], content: Sequence[float], page: Sequence[float]
+) -> Box:
+    """Step 8: expand to contain ``content``, translate into ``page``, then
+    shrink only where the page itself is smaller. The order is load-bearing."""
+    out: Box = [
+        min(box[0], content[0]),
+        min(box[1], content[1]),
+        max(box[2], content[2]),
+        max(box[3], content[3]),
+    ]
+    for lo, hi in ((0, 2), (1, 3)):
+        if out[hi] - out[lo] > page[hi] - page[lo]:
+            continue  # too big to translate into the page; the clamp shrinks it
+        if out[lo] < page[lo]:
+            shift = page[lo] - out[lo]
+        elif out[hi] > page[hi]:
+            shift = page[hi] - out[hi]
+        else:
+            continue
+        out[lo] += shift
+        out[hi] += shift
+    out[0] = max(out[0], page[0])
+    out[1] = max(out[1], page[1])
+    out[2] = min(out[2], page[2])
+    out[3] = min(out[3], page[3])
+    return out
 
 
 def make_bbox_wrapper(
-    original: Callable, params: DetectorParams = DEFAULT_PARAMS
+    original: Callable,
+    params: DetectorParams = DEFAULT_PARAMS,
+    *,
+    strip: bool = False,
+    fit: ReaderFit | None = None,
 ) -> Callable:
-    """Build the get_bounding_box_list wrapper that strips header/footer bands."""
+    """Build the ``get_bounding_box_list`` wrapper implementing the nine-step
+    reader-fit pipeline."""
+
+    settings = fit if fit is not None else ReaderFit()
 
     def wrapper(
         input_doc_fname,
@@ -109,6 +252,7 @@ def make_bbox_wrapper(
         set_of_page_nums_to_crop,
         argparse_args,
     ):
+        # Step 1: per-page tight whitespace boxes from the unmodified detector.
         bbox_list = original(
             input_doc_fname,
             input_doc_mupdf_wrapper,
@@ -117,146 +261,147 @@ def make_bbox_wrapper(
             argparse_args,
         )
 
-        document = input_doc_mupdf_wrapper.document
         num_pages = len(full_page_box_list)
-        # Text comes from the handed wrapper doc (already un-rotated + pre-cropped),
-        # using each page's current MediaBox height for the y-flip.
-        pages = []
-        for i in range(num_pages):
-            page = document[i]
-            mb = page.mediabox
-            height = float(mb.y1 - mb.y0)
-            width = float(mb.x1 - mb.x0)
-            pages.append(page_text_from_mupdf(page, height, width))
-
-        result = detect_bands(pages, params)
-        if result.top is None and result.bottom is None:
+        selected = [i for i in range(num_pages) if i in set_of_page_nums_to_crop]
+        if not selected:
             return bbox_list
 
-        # Resolved per-margin retain/offset (after -p expands to the 4-tuple): [L,B,R,T].
+        rotations = [
+            int(page.rotationAngle) % 360
+            for page in input_doc_mupdf_wrapper.page_list[:num_pages]
+        ]
+
+        # Step 2: strip cuts. Non-exhibiting pages are not abstained; the vote
+        # cap (step 5) and containment expansion (step 8) protect their ink.
+        top_cuts: dict[int, float | None] = dict.fromkeys(selected)
+        bottom_cuts: dict[int, float | None] = dict.fromkeys(selected)
+        doc_top_cut: dict[int, float] = {}
+        doc_bottom_cut: dict[int, float] = {}
+        if strip:
+            document = input_doc_mupdf_wrapper.document
+            # Text comes from the handed wrapper doc (already un-rotated and
+            # pre-cropped), using each page's current MediaBox for the y-flip.
+            pages = []
+            for i in range(num_pages):
+                page = document[i]
+                mb = page.mediabox
+                pages.append(
+                    page_text_from_mupdf(
+                        page, float(mb.y1 - mb.y0), float(mb.x1 - mb.x0)
+                    )
+                )
+            result = detect_bands(pages, params)
+            tol = params.y_cluster_tolerance
+            for i in selected:
+                f = full_page_box_list[i]
+                own_top, own_bottom = page_band_inner_dists(pages[i], params)
+                # Cuts are carried as distance-from-edge, so the conversion stays
+                # height-correct on non-modal pages too.
+                if result.top is not None:
+                    doc_top_cut[i] = f[3] - result.top.dist
+                    if (
+                        own_top is not None
+                        and abs(own_top - result.top.inner_dist) <= tol
+                    ):
+                        top_cuts[i] = doc_top_cut[i]
+                if result.bottom is not None:
+                    doc_bottom_cut[i] = f[1] + result.bottom.dist
+                    if (
+                        own_bottom is not None
+                        and abs(own_bottom - result.bottom.inner_dist) <= tol
+                    ):
+                        bottom_cuts[i] = doc_bottom_cut[i]
+
+        # Step 3: content boxes (retain, absolute4, rotation permutation, cut).
         p4 = list(argparse_args.percentRetain4)
         a4 = list(argparse_args.absoluteOffset4)
-        p_bottom, p_top = float(p4[1]), float(p4[3])
-        a_bottom, a_top = float(a4[1]), float(a4[3])
-
-        # pdfcropmargins rotates the retain/offset per page; our inversion uses the
-        # unrotated values, exact only when they are symmetric or no page is rotated.
-        # Otherwise abstain rather than mis-place the cut.
-        asymmetric = len(set(p4)) > 1 or len(set(a4)) > 1
-        if asymmetric and any(
-            page.rotationAngle for page in input_doc_mupdf_wrapper.page_list
-        ):
-            return bbox_list
-
-        # -u/-s collapse every page's delta to the smallest, so the cut can't be
-        # pre-compensated per page; handled by a shared retain-0 cut below.
-        collapse = bool(argparse_args.uniform or argparse_args.uniformOrderStat4)
-
-        tol = params.y_cluster_tolerance  # cluster tolerance also matches per-page bands
-
-        def page_exhibits(i: int) -> tuple[bool, bool]:
-            """Whether page ``i`` itself shows the confirmed top/bottom band, so a
-            title/figure/header-less page is never clipped to the document cut."""
-            top_dist, bottom_dist = page_band_inner_dists(pages[i], params)
-            has_top = (
-                result.top is not None
-                and top_dist is not None
-                and abs(top_dist - result.top.inner_dist) <= tol
+        content: dict[int, Box] = {
+            i: content_box(
+                bbox_list[i],
+                full_page_box_list[i],
+                percent_retain4=p4,
+                absolute4=a4,
+                rotation=rotations[i],
+                top_cut=top_cuts[i],
+                bottom_cut=bottom_cuts[i],
             )
-            has_bottom = (
-                result.bottom is not None
-                and bottom_dist is not None
-                and abs(bottom_dist - result.bottom.inner_dist) <= tol
-            )
-            return has_top, has_bottom
-
-        # Cut for page ``i`` in its OWN post-precrop frame; distance-from-edge keeps
-        # the conversion height-correct even on non-modal pages.
-        def top_cut_for(i: int) -> float | None:
-            if result.top is None:
-                return None
-            return full_page_box_list[i][3] - result.top.dist
-
-        def bottom_cut_for(i: int) -> float | None:
-            if result.bottom is None:
-                return None
-            return full_page_box_list[i][1] + result.bottom.dist
-
-        # Exhibit flags + cuts computed once per cropped page; reused by every path.
-        info = {
-            i: (*page_exhibits(i), top_cut_for(i), bottom_cut_for(i))
-            for i in range(num_pages)
-            if i in set_of_page_nums_to_crop
+            for i in selected
         }
+
+        def floored(box: Box, page_num: int) -> Box:
+            if not settings.reader:
+                return box
+            if rotations[page_num] in _UPRIGHT_ROTATIONS:
+                screen_w, screen_h = settings.screen_w_pt, settings.screen_h_pt
+            else:
+                # The displayed page is transposed, so the floor's axes swap.
+                screen_w, screen_h = settings.screen_h_pt, settings.screen_w_pt
+            return apply_floor(box, screen_w, screen_h, settings.max_scale)
+
+        # Step 4: the cohort (document scope only). Off-modal and 90/270 pages
+        # are step-7 cases; an exempt page 0 still shares the box (see below).
+        conforming: list[int] = []
+        cohort: list[int] = []
+        if settings.scope == SCOPE_DOCUMENT:
+            sizes = {
+                i: (
+                    full_page_box_list[i][2] - full_page_box_list[i][0],
+                    full_page_box_list[i][3] - full_page_box_list[i][1],
+                )
+                for i in selected
+            }
+            modal = modal_page_size([sizes[i] for i in selected])
+            if modal is not None:
+                conforming = [
+                    i
+                    for i in selected
+                    if rotations[i] in _UPRIGHT_ROTATIONS
+                    and abs(sizes[i][0] - modal[0]) <= COHORT_SIZE_TOLERANCE
+                    and abs(sizes[i][1] - modal[1]) <= COHORT_SIZE_TOLERANCE
+                ]
+            cohort = [
+                i
+                for i in conforming
+                if not (settings.exclude_first_page and i == 0)
+            ]
+            # Fewer than two voters cannot establish a shared box, so the whole
+            # document degrades to page scope.
+            if len(cohort) < 2:
+                conforming = []
+                cohort = []
+
+        shared: Box | None = None
+        if cohort:
+            # Step 5: union of the cohort's content boxes. Capping each vote at
+            # the document cut keeps band-zone ink from re-widening the box.
+            votes: list[Box] = []
+            for i in cohort:
+                vote = list(content[i])
+                if i in doc_top_cut:
+                    vote[3] = min(vote[3], doc_top_cut[i])
+                if i in doc_bottom_cut:
+                    vote[1] = max(vote[1], doc_bottom_cut[i])
+                votes.append(vote)
+            # Step 6: the floor, once; every cohort page is upright.
+            shared = floored(union_boxes(votes), cohort[0])
+
+        # Steps 7 and 8: per-page placement.
         new_bbox_list = [list(b) for b in bbox_list]
+        conforming_set = set(conforming)
+        for i in selected:
+            if shared is not None and i in conforming_set:
+                # Includes an exempt page 0: it shares the box, deviating only
+                # through step 8's minimal expansion.
+                start: Box = list(shared)
+            else:
+                # Step 7: page scope and off-cohort pages, own box floored.
+                start = floored(list(content[i]), i)
+            new_bbox_list[i] = place_box(start, content[i], full_page_box_list[i])
 
-        if collapse:
-            # One box wins (the min delta), so take an edge only if no non-exhibiting
-            # page would lose real content; then inject the final edge at retain 0.
-            do_top = result.top is not None
-            do_bottom = result.bottom is not None
-            for i, (ht, hb, tc, bc) in info.items():
-                if do_top and not ht and bbox_list[i][3] > tc + tol:
-                    do_top = False
-                if do_bottom and not hb and bbox_list[i][1] < bc - tol:
-                    do_bottom = False
-            new_p4 = list(p4)
-            if do_top:
-                new_p4[3] = 0.0
-            if do_bottom:
-                new_p4[1] = 0.0
-            argparse_args.percentRetain4 = new_p4
-            for i, (ht, hb, tc, bc) in info.items():
-                f = full_page_box_list[i]
-                if do_top:
-                    new_bbox_list[i][3] = min(new_bbox_list[i][3], tc + a_top)
-                if do_bottom:
-                    new_bbox_list[i][1] = max(new_bbox_list[i][1], bc - a_bottom)
-                new_bbox_list[i][3] = min(new_bbox_list[i][3], f[3])  # keep in page
-                new_bbox_list[i][1] = max(new_bbox_list[i][1], f[1])
-            return new_bbox_list
-
-        # Per-page path (default profile and -s, which crop independently): tighten
-        # only band-exhibiting pages with retain pre-compensation, leaving every
-        # other page as pdfcropmargins produced it. Page 0 (title) is never touched.
-        # If pre-comp is out of range, fall back to retain 0 on that edge.
-        fallback_top = False
-        fallback_bottom = False
-        for i, (has_top, has_bottom, tc, bc) in info.items():
-            if i == 0:
-                continue
-            f = full_page_box_list[i]
-            b = new_bbox_list[i]
-            if has_top and tc is not None and tc < b[3]:
-                try:
-                    b[3] = _tighten_top(f[1], f[3], b[3], tc, p_top, a_top)
-                except _PreCompUnavailable:
-                    fallback_top = True
-            if has_bottom and bc is not None and bc > b[1]:
-                try:
-                    b[1] = _tighten_bottom(f[1], f[3], b[1], bc, p_bottom, a_bottom)
-                except _PreCompUnavailable:
-                    fallback_bottom = True
-
-        if fallback_top or fallback_bottom:
-            new_p4 = list(p4)
-            if fallback_top:
-                new_p4[3] = 0.0
-            if fallback_bottom:
-                new_p4[1] = 0.0
-            argparse_args.percentRetain4 = new_p4
-            # Retain on the fallback edge is now 0, so re-inject the cut directly
-            # (from the original whitespace box) on every exhibiting page.
-            for i, (has_top, has_bottom, tc, bc) in info.items():
-                if i == 0:
-                    continue
-                b = new_bbox_list[i]
-                f = full_page_box_list[i]
-                if fallback_top and has_top and tc is not None and tc < f[3]:
-                    b[3] = min(bbox_list[i][3], tc + a_top)
-                if fallback_bottom and has_bottom and bc is not None and bc > f[1]:
-                    b[1] = max(bbox_list[i][1], bc - a_bottom)
-
+        # Step 9: both fields were applied in step 3; leaving either set would
+        # have pdfcropmargins apply it a second time downstream.
+        argparse_args.percentRetain4 = [0.0, 0.0, 0.0, 0.0]
+        argparse_args.absoluteOffset4 = [0.0, 0.0, 0.0, 0.0]
         return new_bbox_list
 
     return wrapper
@@ -266,10 +411,11 @@ def run_crop(
     crop_argv: Sequence[str],
     *,
     strip: bool,
+    fit: ReaderFit | None = None,
     params: DetectorParams = DEFAULT_PARAMS,
 ) -> int:
     """Run a single crop, returning a structured exit code. The monkeypatch is
-    installed only when ``strip`` is true and always removed afterward."""
+    installed only when a feature needs it, and is always removed afterward."""
     # Import here so a missing dependency is a retryable environmental failure,
     # not an import-time crash.
     try:
@@ -281,9 +427,11 @@ def run_crop(
 
     installed = False
     original = None
-    if strip:
+    if strip or (fit is not None and fit.active):
         original = main_mod.get_bounding_box_list
-        main_mod.get_bounding_box_list = make_bbox_wrapper(original, params)
+        main_mod.get_bounding_box_list = make_bbox_wrapper(
+            original, params, strip=strip, fit=fit
+        )
         installed = True
 
     try:
@@ -292,8 +440,8 @@ def run_crop(
         exit_code = exc.code if isinstance(exc.code, int) else 1
         stderr_str = str(exc)
     except Exception as exc:  # noqa: BLE001
-        # A detector/PyMuPDF bug escaping crop() is environmental, not input-bound;
-        # emit a marker (never the raw traceback) so it is retried, not suppressed.
+        # A shim/PyMuPDF bug escaping crop() must be retried, never suppressed;
+        # emit the marker, not the raw traceback.
         print(f"{_ENV_MARKER} {type(exc).__name__}", file=sys.stderr)
         return EXIT_ENVIRONMENTAL
     finally:
@@ -317,11 +465,24 @@ def run_crop(
 
 def main(argv: list[str] | None = None) -> int:
     raw = sys.argv[1:] if argv is None else list(argv)
-    # The flag is only ever the leading token, so consuming it only there can
-    # never swallow a pdfcropmargins option value that equals it (e.g. a password).
-    if raw and raw[0] == STRIP_FLAG:
-        return run_crop(raw[1:], strip=True)
-    return run_crop(raw, strip=False)
+    # Directives are only ever leading tokens, so consuming them only there never
+    # swallows a pdfcropmargins option value that equals one (e.g. a password).
+    strip = False
+    fit: ReaderFit | None = None
+    while raw:
+        if raw[0] == STRIP_FLAG:
+            strip = True
+            raw = raw[1:]
+        elif raw[0] == FIT_FLAG and len(raw) >= 2:
+            try:
+                fit = ReaderFit.parse(raw[1])
+            except ValueError as exc:
+                print(f"{_ENV_MARKER} bad {FIT_FLAG} payload: {exc}", file=sys.stderr)
+                return EXIT_ENVIRONMENTAL
+            raw = raw[2:]
+        else:
+            break
+    return run_crop(raw, strip=strip, fit=fit)
 
 
 if __name__ == "__main__":

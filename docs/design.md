@@ -19,6 +19,7 @@ its native OneDrive integration.
 | Crop tool | `pdfcropmargins` | Adjusts CropBox/MediaBox only, no re-render: lossless, fast, no file-size bloat (important for the Scribe). Vendored at `nix/pdfcropmargins.nix`. |
 | Crop invocation | Via a crop shim (`scribe-crop-shim`) | The service shells out to our shim, which imports and drives `pdfcropmargins`' public `crop()`. Disabled, it is bit-for-bit the bare tool for the same argv; enabled, it composes the header/footer strip into the same single crop. Keeps the subprocess isolation (timeout / OOM / native-crash containment) the daemon relies on. |
 | Header/footer strip | Opt-in, default off | Detect and trim running headers/footers losslessly (box rewrite only) by cross-page positional recurrence, abstaining whenever not confident. First profile key that is a shim directive, not a `pdfcropmargins` flag. See `docs/header-footer-strip.md`. |
+| Reader-fit sizing | On by default | The shim owns the final per-page boxes: one shared box per document (outlier pages deviate individually), floored so the on-device magnification never exceeds `fit_max_scale`. Replaces `uniform`/`same_size`, which are removed from the schema. See `docs/reader-fit.md`. |
 | Crop config | Auto-crop default + per-file sidecar overrides | One sensible profile for everything; optional `<name>.pdf.toml` sidecar for documents that need tuning. |
 | Originals | Non-destructive | Original stays in `upload/`; cropped copy written to `processed/` at the same relative path. Re-runnable if settings change. |
 | Output integrity | Atomic publish | Outputs are written to a temp file and atomically renamed into place; the processor is the sole writer of `processed/`/`failed/`. Prevents the sync client uploading half-written files or creating conflict copies. |
@@ -132,29 +133,41 @@ overlaid with the drive `config.toml [crop]` table (see Configuration). Tuned
 for single-column-friendly reading on the Scribe with consistent page sizes.
 Built-in defaults:
 
-- `-p 10` retain 10% of existing margins (the tool default)
-- neither `-u` nor `-s`: each page is cropped to its own bounding box
+- `-p 10` retain 10% of existing margins (avoids clipping descenders/superscripts)
+- `fit_scope = "document"`: one shared box for the document, so the reader's zoom
+  does not jitter between pages
+- `fit_reader = true` with `fit_max_scale = 1.15`: never magnify a page past 1.15x
+  its printed size on the configured screen
+- `fit_exclude_first_page = true`: page 0 does not vote in the shared-box
+  aggregation, so a badge or full-bleed cover does not loosen every other page
 
-Rationale: cropping per page (no `-u`/`-s`) gives each page its tightest crop,
-so pages with wide margins are trimmed more than pages with narrow margins
-instead of every page sharing one conservative crop amount. Retaining a small
-margin avoids clipping descenders/superscripts. Operators who prefer a stable,
-consistent page box across the document (no size jitter between pages on the
-Scribe) can set `uniform`/`same_size` from any device via the drive
-`config.toml` without touching code or the server.
+Rationale: a maximal crop is right for letter-size papers (the on-device scale
+stays below 1, so every point of margin helps) but wrong for small-trim books,
+where it balloons the page past its printed size. Because PDF units are physical,
+bounding the magnification against the configured screen expresses that in one
+continuous geometric rule, with no per-document configuration and no document
+classification. Consistent page geometry is the default because per-page cropping
+makes the reader's zoom visibly jitter between pages; `fit_scope = "page"` restores
+per-page boxes for documents that want them.
+
+The crop shim owns the final boxes for this: it sees every page's tight box and
+full page box before the crop math runs, so the floor, the shared box, the
+first-page exemption, and the header/footer strip all compose in one pass. The
+`uniform`/`same_size` keys (`-u`/`-s`) are therefore **not** in the schema; their
+min-delta semantics cannot express the floor, and they would post-process the
+boxes the shim injects. See `docs/reader-fit.md` for the full behavior spec, the
+decision record, and the rejected alternatives.
 
 ### Per-file sidecar overrides
 
 Optional TOML file `<name>.pdf.toml` next to the source PDF. Highest precedence;
 absent keys fall back to the effective default profile (built-in defaults
 overlaid with the drive `config.toml`). Schema (keys map to `pdfcropmargins`
-flags, except the shim directive `strip_header_footer` noted below):
+flags, except the shim directives noted below):
 
 ```toml
 percent_retain   = 15          # -p PCT          (single value)
 percent_retain4  = [50,20,40,10] # -p4 L B R T   (overrides percent_retain)
-uniform          = true        # -u
-same_size        = true        # -s
 absolute4        = [0,0,12,0]  # -a4 L B R T   (bp to crop; negative adds space)
 pre_crop         = 5           # -ap BP        (pre-crop before bbox detect; scanned/noisy)
 threshold        = 191         # -t BYTEVAL    (background detection threshold)
@@ -162,24 +175,45 @@ use_ghostscript  = true        # -gs           (ghostscript bbox detection)
 pages            = "2-"        # -g PAGESTR    (restrict cropped pages)
 password         = "secret"    # -pw PASSWD    (encrypted input)
 strip_header_footer = true     # detect+trim running header/footer (default false)
+fit_reader       = true        # bound on-device magnification (default true)
+fit_max_scale    = 1.15        # the magnification cap (default 1.15)
+fit_scope        = "document"  # "document" (shared box) or "page" (default "document")
+fit_exclude_first_page = true  # document scope: page 0 does not vote (default true)
 ```
 
 Validation: unknown keys are rejected (fail the file rather than silently
-ignore). The mapping from TOML keys to CLI flags lives in one place.
+ignore). The mapping from TOML keys to CLI flags lives in one place. `uniform`
+and `same_size` were removed with reader-fit and are now rejected as unknown
+keys; document-wide consistency is `fit_scope = "document"` instead.
 
-`strip_header_footer` is the one profile key that is **not** a `pdfcropmargins`
-CLI flag; it is a directive to the crop shim that wraps `pdfcropmargins`. It is
-validated and merged through the same precedence path (built-in `false` < drive
-`config.toml [crop]` < per-file sidecar) but is never emitted to the
-`pdfcropmargins` argv. When on, the shim detects the document's running header
+`strip_header_footer` and the four `fit_*` keys are the profile keys that are
+**not** `pdfcropmargins` CLI flags; they are directives to the crop shim that
+wraps `pdfcropmargins`. They are validated and merged through the same precedence
+path (built-in < drive `config.toml [crop]` < per-file sidecar) but are never
+emitted to the `pdfcropmargins` argv.
+
+When `strip_header_footer` is on, the shim detects the document's running header
 and footer (by cross-page positional recurrence of an isolated edge line) and
 trims them as part of the same single, lossless crop, abstaining whenever it is
 not confident. See `docs/header-footer-strip.md` for the algorithm and the
 constants.
 
-Fingerprint interaction: a `DETECTOR_VERSION` plus the strip parameters are
-folded into the dedup key **only when stripping is enabled**, so a disabled file
-keeps its current key and does not re-crop on rollout. PyMuPDF (which the shim
+The `fit_*` keys drive the reader-fit pipeline: `fit_scope` chooses one shared
+box per document or per-page boxes, `fit_reader`/`fit_max_scale` bound the
+on-device magnification against the screen size from the server config's
+`[reader]` table, and `fit_exclude_first_page` keeps a first-page artifact from
+widening the shared box. Content safety is absolute in every mode: a page whose
+own content does not fit the shared box gets that box minimally expanded for
+itself alone, so no page ever loses ink. See `docs/reader-fit.md` for the
+normative nine-step behavior spec.
+
+Fingerprint interaction: each shim directive folds one token into the dedup key,
+and only when it is in force, so a file with a feature off keys identically to a
+run without the feature at all. The strip token is a `DETECTOR_VERSION` plus the
+strip constants. The reader-fit token carries `fit_scope` always,
+`fit_exclude_first_page` only under document scope, and the screen dimensions
+plus `fit_max_scale` only when `fit_reader` is true, so bumping `fit_max_scale`
+does not re-crop files that have the floor disabled. PyMuPDF (which the shim
 reads text geometry through) is deliberately **not** in the key and not a
 declared dependency: it rides transitively on `pdfcropmargins`' pinned version,
 so the existing toolchain token covers it, the same stance the whitespace crop
@@ -209,11 +243,15 @@ For each candidate PDF at relative path `<relpath>` under `upload/`:
 3. **Build the command** from the resolved argv, targeting a temp output path on
    the same filesystem as `processed/`. The target is the crop shim
    (`scribe-crop-shim`), not `pdfcropmargins` directly; the resolved
-   `strip_header_footer` directive is passed to the shim (and folded into the
-   fingerprint) only when enabled.
+   `strip_header_footer` and reader-fit directives are passed to the shim (and
+   folded into the fingerprint) only when they would change the output. The
+   reader-fit directive is resolved once, from the crop profile's `fit_*` keys
+   plus the server config's `[reader]` screen size, and that one resolution
+   drives both the command and the key, so they cannot drift.
 4. **Run the crop shim** with a timeout. It drives `pdfcropmargins`' public
-   `crop()`: with strip off it is a pass-through with bit-for-bit parity, with
-   strip on it composes the header/footer trim into the same single crop.
+   `crop()`: with every feature off it is a pass-through with bit-for-bit
+   parity; otherwise it composes the header/footer trim and the reader-fit
+   sizing into the same single crop and injects the final boxes directly.
 5. **On success:** atomically rename the temp output to `processed/<relpath>`,
    then record the fingerprint as a success. (Publish-then-record ordering: if
    we crash between the two, the next reconcile recomputes the same fingerprint
@@ -338,6 +376,13 @@ daemon:
 - `max_input_bytes`: inputs larger than this go straight to `failed/` with a log.
 - `retry_backoff`: bounds for retrying environmental failures.
 - `state_path`: location of the SQLite state store.
+- `[reader]`: the reader's screen size, either a built-in `device` preset
+  (default `"scribe-colorsoft"`, 6.6 x 8.8 in) or explicit `screen_width_in` /
+  `screen_height_in`. The two are mutually exclusive. Screen hardware describes
+  the deployment and never changes, so it belongs here rather than in the drive
+  config's "what to do to PDFs" surface; the behavioral `fit_*` knobs stay in the
+  crop profile. The service logs the resolved screen size at startup so a
+  deployment that forgot the table on a different device is visible.
 
 The OneDrive account, auth, and `sync_list` are configured on the `onedrive`
 client side (NixOS module), not in this service.
@@ -417,12 +462,21 @@ client side (NixOS module), not in this service.
 - **Config robustness:** a malformed `config.toml` leaves processing on the
   last-known-good profile and produces `config.error.log`; fixing it clears the
   error and reloads.
-- **Header/footer strip:** with the feature off, shim output is bit-for-bit the
-  bare `pdfcropmargins` call and the fingerprint is unchanged; with it on, a
-  recurring band is trimmed while title pages, figure-top pages, and header-less
-  pages are preserved. Detector logic is unit-tested without PDFs; the shim is
-  tested against the real `pdfcropmargins`/PyMuPDF. Full criteria in
-  `docs/header-footer-strip.md`.
+- **Header/footer strip:** with every shim feature off, shim output is
+  bit-for-bit the bare `pdfcropmargins` call; with strip on, a recurring band is
+  trimmed while title pages and figure-top pages keep their content (they deviate
+  from the shared box individually rather than being clipped). Detector logic is
+  unit-tested without PDFs; the shim is tested against the real
+  `pdfcropmargins`/PyMuPDF. Full criteria in `docs/header-footer-strip.md`.
+- **Reader-fit:** the pipeline's steps are unit-tested as pure geometry (retain
+  padding and its internal ordering, cohort selection, aggregation with strip
+  caps, the binding-dimension floor, and expand/translate/shrink placement); the
+  acceptance criteria are geometric assertions on published boxes, run at the
+  shim level against the real tool. A letter paper does not hit the floor and
+  every cohort page shares one box; an A5 book grows only its binding dimension
+  to exactly `screen/max_scale`; badge pages, mixed-size inserts, and rotated
+  pages deviate individually without losing ink. Full criteria in
+  `docs/reader-fit.md`.
 - **End-to-end:** with the real OneDrive client, drop a PDF from another device,
   confirm it appears cropped in `processed/` and imports cleanly on the Scribe.
 
