@@ -88,10 +88,10 @@ def compute_fingerprint(
     profile_token: str,
     tool_version: ToolVersion,
     strip_token: str | None = None,
+    fit_token: str | None = None,
 ) -> str:
-    # Key = these bytes + this exact argv (profile_token, already merged) + this
-    # toolchain. strip_token is added only when stripping is enabled, so a
-    # disabled file's key is byte-identical to a no-feature run and never re-crops.
+    # Key = bytes + effective argv + toolchain + one token per directive in
+    # force; each token carries only parameters that can change the output.
     h = hashlib.sha256()
     if pdf_bytes is None:
         h.update(_digest_file("pdf", Path(pdf_path)))
@@ -101,6 +101,8 @@ def compute_fingerprint(
     h.update(_digest_part("profile", profile_token.encode("utf-8")))
     if strip_token is not None:
         h.update(_digest_part("strip", strip_token.encode("utf-8")))
+    if fit_token is not None:
+        h.update(_digest_part("fit", fit_token.encode("utf-8")))
     return h.hexdigest()
 
 

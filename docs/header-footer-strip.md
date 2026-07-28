@@ -7,6 +7,16 @@ invariant in that document and in `CLAUDE.md`. The pdfcropmargins integration
 claims below were verified against the vendored source (version 2.2.1, pinned in
 `nix/pdfcropmargins.nix`); file:line citations are to that source.
 
+**Superseded in part by `docs/reader-fit.md`.** The detection algorithm below is
+unchanged and remains authoritative. How the confirmed cut is *applied* is not:
+reader-fit made the shim the sole owner of the final per-page boxes, so the
+retain pre-compensation and its `percentRetain4`-zero fallback, the per-page
+abstention for non-exhibiting pages, the `-u`/`-s` uniform-cut branch, and the
+abstention on asymmetric-retain-plus-rotation are all gone, subsumed by one
+ordered pass. The sections below marked *(superseded)* describe the old
+application path and are kept for the decision record. Read reader-fit's
+nine-step behavior spec for what the code does now.
+
 ## Goal
 
 `pdfcropmargins` removes whitespace margins only. On academic papers it keeps the
@@ -150,7 +160,12 @@ Independently for top and bottom:
    whitespace gap by the minimum separation so it never clips a descender or the
    page-number glyphs.
 
-### Per-page application and the percentRetain interaction
+### Per-page application and the percentRetain interaction *(superseded)*
+
+Superseded by `docs/reader-fit.md` steps 3 and 9: the retain and `absolute4` are
+now applied shim-side to each page's own margins and then zeroed on
+`argparse_args`, so there is no inversion to invert and no fallback. The
+description below is the original design.
 
 `pdfcropmargins` adds back a percentage of each margin around the supplied box
 (`calculate_crop_list`, `main_pdfCropMargins.py:362-378,516-517`), so a naively
@@ -175,14 +190,15 @@ would move the cut: fold the stripped edge's `absolute4` term into the inversion
 (it is a simple additive offset), or document strip + top/bottom `absolute4` as
 best-effort. A fixture should cover strip combined with a top/bottom `absolute4`.
 
-### Constraint: uniform / same-size crop
+### Constraint: uniform / same-size crop *(superseded, now moot)*
 
-With `-u`/`-s`, the crop math collapses to a document-wide box or min/max deltas
-across pages **before** per-page boxes are formed (`:270-300,467-468`), which
-flattens both per-page cuts and the per-page pre-compensation. Because the band is
-at a consistent y by construction, the resolution is: when `-u`/`-s` are set,
-compute a single document-wide cut and tighten uniformly. A fixture must cover
-strip combined with `-u`.
+With `-u`/`-s`, the crop math collapsed to a document-wide box or min/max deltas
+across pages **before** per-page boxes were formed (`:270-300,467-468`), which
+flattened both per-page cuts and the per-page pre-compensation, so the shim took
+a separate document-wide-cut branch for them. Both keys were removed from the
+profile schema with reader-fit (they would post-process the boxes the shim now
+injects), so this constraint no longer applies and the branch is deleted.
+Document-wide consistency is `fit_scope = "document"` instead.
 
 ### Tunable parameters (data)
 
@@ -318,14 +334,16 @@ vendored `pdfcropmargins`/PyMuPDF.
   incrementing footer page number is still fully detected.
 - **Abstains:** no running header, and a tall figure at the top of one interior
   page, produce no top crop.
-- **Title page and header-less pages preserved.**
+- **Title page and header-less pages keep their content.** Under reader-fit they
+  deviate from the shared box individually rather than being clipped to the cut.
 - **Too few voters:** a 2-page doc does not self-confirm (min voter guard).
 - **No text layer:** image-only PDF yields the whitespace-only crop.
 - **Footnote guard:** a multi-line footnote block is not taken as a footer.
-- **Retain pre-compensation:** the published crop lands exactly at the cut and does
-  not re-include the band; left/right retain matches the no-strip case.
-- **Uniform crop:** strip combined with `-u`/`-s` produces a single document-wide
-  cut, not a flattened/under-crop.
+- **Retain applied once:** the published crop lands at the cut and does not
+  re-include the band, and the retain is not applied a second time downstream
+  (reader-fit steps 3 and 9; this replaces the old pre-compensation criterion).
+- ~~**Uniform crop:** strip combined with `-u`/`-s`~~ moot; both keys were removed
+  from the schema with reader-fit.
 - **Coordinate edge:** a fixture asserts the cut lands on the correct (header vs
   footer) edge, guarding the y-flip.
 - **Lossless:** no re-render (content streams unchanged); the crop only shrinks the

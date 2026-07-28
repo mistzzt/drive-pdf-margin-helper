@@ -12,7 +12,10 @@ the local mirror is its entire world.
 
 `docs/design.md` is the authoritative spec for behavior, the sync-client contract, and the
 rationale behind every decision. Read it before changing processing, reconcile, or the
-sync boundary. `README.md` documents the user-facing config and NixOS deployment.
+sync boundary. `docs/reader-fit.md` holds the normative nine-step spec for the crop shim's
+box pipeline; `docs/header-footer-strip.md` holds the band-detection algorithm (its
+*application* sections are superseded by reader-fit). `README.md` documents the
+user-facing config and NixOS deployment.
 
 ## Commands
 
@@ -41,15 +44,30 @@ Data flows through a single-source-of-truth pipeline keyed on the source PDF's r
 under `upload/`. Output paths mirror that relpath into `processed/` and `failed/`.
 
 - **`profile.py`** is the one place that maps crop config keys to `pdfcropmargins` flags
-  (`FLAG_MAP`). Profiles layer built-in < drive `config.toml [crop]` < per-file `.pdf.toml`
+  (`FLAG_MAP`) or to shim directives (`SHIM_DIRECTIVE_MAP`: `strip_header_footer`, the four
+  `fit_*` keys). Profiles layer built-in < drive `config.toml [crop]` < per-file `.pdf.toml`
   sidecar (`merge_profiles`). All config validation/coercion goes through `validate_and_coerce`.
-  Adding a crop knob means editing `FLAG_MAP` and `CropProfile` here only.
-- **`fingerprint.py`** computes the dedup key: `hash(pdf + profile_token + tool version)`,
-  where `profile_token` is the *effective* profile's emitted argv (built-in < drive config
-  < sidecar, already merged). Keying on the resolved argv means any layer change that alters
-  the crop flags invalidates the key, one that does not (a comment-only config edit) does
-  not, and there is no manual version to bump. Oversize inputs use a separate size-keyed
-  fingerprint so raising `max_input_bytes` later un-suppresses them.
+  Adding a crop knob means editing one of those two maps and `CropProfile` here only.
+  `FLAG_MAP` deliberately excludes every pdfcropmargins option that post-processes the crop
+  list (`-u`/`-m*`, `-s`/`-ms`, `--cropSafe`, `--setPageRatios`, `--centerText`, even/odd):
+  the shim injects final boxes as-is, which is only sound while none of them can run.
+- **`crop_shim.py`** is the `scribe-crop-shim` console script and the sole owner of the final
+  per-page boxes. With every feature off it installs nothing and is bit-for-bit the bare tool.
+  Otherwise one `get_bounding_box_list` wrapper runs the nine-step pipeline of
+  `docs/reader-fit.md` (tight boxes -> strip cuts -> content boxes -> cohort -> aggregation ->
+  floor -> page-scope cases -> placement -> injection) and zeroes both `percentRetain4` and
+  `absoluteOffset4`, because step 3 already applied them. The geometry steps are exported as
+  pure functions (`content_box`, `modal_page_size`, `union_boxes`, `apply_floor`, `place_box`)
+  so they unit-test without a PDF.
+- **`fingerprint.py`** computes the dedup key: `hash(pdf + profile_token + tool version)` plus
+  one token per shim directive in force, where `profile_token` is the *effective* profile's
+  emitted argv (built-in < drive config < sidecar, already merged). Keying on the resolved
+  argv means any layer change that alters the crop flags invalidates the key, one that does
+  not (a comment-only config edit) does not, and there is no manual version to bump. A
+  directive token is folded in only when its feature is on, and carries only the parameters
+  that can change the output (so bumping `fit_max_scale` does not re-crop files with
+  `fit_reader = false`). Oversize inputs use a separate size-keyed fingerprint so raising
+  `max_input_bytes` later un-suppresses them.
 - **`processor.py`** (`process_pdf`) is the core unit: resolve the effective profile, compute
   the fingerprint from its argv, skip-check against the state store, build argv, run with
   timeout, then publish. Failures are classified into `CONTENT_FAILURE` (input-bound,
@@ -68,9 +86,14 @@ under `upload/`. Output paths mirror that relpath into `processed/` and `failed/
 - **`watcher.py`** wraps `watchdog`/inotify. It routes `*.pdf`/`*.pdf.toml` events under
   `upload/` (a `.toml` event maps back to its PDF) and root `config.toml` events into a queue,
   with per-path debouncing.
+- **`config.py`** holds the server config, including the `[reader]` table: the reader's screen
+  size, as a `device` preset (default `scribe-colorsoft`, 6.6 x 8.8 in) or explicit inches,
+  never both. Hardware describes the deployment, so it lives here rather than in the drive
+  config; `processor.resolve_reader_fit` is the one place it meets the profile's `fit_*` knobs.
 - **`service.py`** (`Service`) wires it together: loads config, runs startup reconcile, spawns
   a worker queue + heartbeat, owns the stability check and retry/backoff loop, and reloads the
-  drive config on change. `MirrorReadiness` gates the destructive reverse-GC.
+  drive config on change. `MirrorReadiness` gates the destructive reverse-GC. Startup logs the
+  resolved reader screen so a deployment that forgot `[reader]` is visible.
 - **`cli.py`** resolves the binary, parses args, and runs `run` or `reconcile`.
 
 ## Critical invariants (do not break)
@@ -88,9 +111,15 @@ under `upload/`. Output paths mirror that relpath into `processed/` and `failed/
   (`assume_current` or an existing `readiness_marker` outside the synced subtree). An absent
   source on a lagging/unsynced mirror is NOT a deletion. The forward pass has no such hazard.
 - **Fingerprint matches the command.** Resolve the effective profile once, fingerprint its
-  argv, and build the `pdfcropmargins` command from that same argv, so the profile applied
-  always matches the fingerprint recorded, even if a config reload races. Read each input
-  (sidecar, drive config snapshot) once for that single resolution.
+  argv plus the resolved shim directives, and build the command from that same resolution, so
+  what ran always matches what was recorded, even if a config reload races. Read each input
+  (sidecar, drive config snapshot) once for that single resolution. `ReaderFit.token()` is
+  both the directive payload and the fingerprint contribution for exactly this reason.
+- **The shim owns the final boxes, and owns the fields it consumed.** When the wrapper is
+  installed it applies the retain and `absolute4` itself and MUST zero both
+  `argparse_args.percentRetain4` and `argparse_args.absoluteOffset4`; leaving either set makes
+  pdfcropmargins apply it a second time downstream (the offset is a separate additive term, so
+  it would crop past the computed box and clip ink).
 
 ## Project conventions
 

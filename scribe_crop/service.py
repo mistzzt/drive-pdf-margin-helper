@@ -252,6 +252,9 @@ class Service:
     def run(self, *, heartbeat_seconds: float = 300.0) -> None:
         self.ensure_dirs()
         log.info("tool versions: %s", self._tool_version.as_token())
+        # Surfaced so a deployment that forgot the [reader] table on a different
+        # device is visible rather than silently cropping to the default panel.
+        log.info("reader screen: %s", self._config.reader.describe())
         if self._tool_version.pdfcropmargins is None or self._tool_version.ghostscript is None:
             log.warning(
                 "tool version probe incomplete (%s); a null half weakens "

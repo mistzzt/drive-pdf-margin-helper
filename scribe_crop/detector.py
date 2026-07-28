@@ -1,13 +1,5 @@
-"""Running-header / running-footer band detection (pure geometry, see
-``docs/header-footer-strip.md``).
-
-The signal is cross-page positional recurrence: an isolated edge line that
-recurs at the same distance-from-edge across most pages is the header/footer.
-Text-agnostic and abstains on weak evidence, so a header-less doc or a
-figure-at-top page is never trimmed. Cuts are carried as distance-from-edge;
-the caller converts to PDF bottom-left per page (``y_pdf = height - y_mupdf``,
-PyMuPDF bboxes are top-left/y-down).
-"""
+"""Running-header/footer band detection by cross-page positional recurrence;
+pure geometry, abstains on weak evidence, cuts carried as distance-from-edge."""
 
 from __future__ import annotations
 

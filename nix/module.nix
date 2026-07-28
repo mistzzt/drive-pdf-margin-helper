@@ -59,10 +59,17 @@ in {
         stability_seconds = 5.0;
         worker_count = 1;
         retry_backoff.max_attempts = 8;
+        reader.device = "scribe-colorsoft";
       };
       description = ''
         Server config fields rendered to the server TOML (root is set
         separately). See the project README for the full schema.
+
+        The reader table sets the screen size used for the reader-fit
+        magnification cap: either reader.device (a built-in preset, default
+        "scribe-colorsoft" at 6.6 x 8.8 in) or explicit reader.screen_width_in
+        and reader.screen_height_in, never both. The service logs the resolved
+        screen size at startup.
       '';
     };
 

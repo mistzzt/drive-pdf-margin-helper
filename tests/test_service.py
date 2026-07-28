@@ -319,3 +319,21 @@ def test_heartbeat_reports_since_last_change(config, caplog):
         svc.heartbeat()
     svc.close()
     assert any("heartbeat" in r.message for r in caplog.records)
+
+
+def test_run_logs_the_resolved_reader_screen(config, caplog):
+    # A deployment that forgot the [reader] table on a different device must be
+    # visible in the log rather than silently cropping to the default panel.
+    from dataclasses import replace
+
+    from scribe_crop.config import ReaderConfig
+
+    other = replace(
+        config, reader=ReaderConfig(screen_width_in=5.0, screen_height_in=7.0)
+    )
+    svc = _service(other)
+    svc.stop()  # run() exits its wait loop immediately
+    with caplog.at_level("INFO", logger="scribe_crop.service"):
+        svc.run(heartbeat_seconds=3600.0)
+    messages = [r.getMessage() for r in caplog.records]
+    assert any("reader screen" in m and "5x7 in" in m for m in messages)

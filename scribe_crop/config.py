@@ -7,12 +7,48 @@ from pathlib import Path
 from .profile import UnknownProfileKey, validate_and_coerce
 
 
+POINTS_PER_INCH = 72.0
+
+
 @dataclass(frozen=True)
 class RetryBackoff:
     initial_seconds: float = 30.0
     max_seconds: float = 3600.0
     multiplier: float = 2.0
     max_attempts: int = 8
+
+
+@dataclass(frozen=True)
+class ReaderConfig:
+    """Reader screen geometry, in inches. Hardware describes the deployment, so
+    it lives in the server config rather than the synced crop profile."""
+
+    screen_width_in: float
+    screen_height_in: float
+
+    @property
+    def screen_width_pt(self) -> float:
+        return self.screen_width_in * POINTS_PER_INCH
+
+    @property
+    def screen_height_pt(self) -> float:
+        return self.screen_height_in * POINTS_PER_INCH
+
+    def describe(self) -> str:
+        return (
+            f"{self.screen_width_in:g}x{self.screen_height_in:g} in "
+            f"({self.screen_width_pt:g}x{self.screen_height_pt:g} pt)"
+        )
+
+
+# Kindle Scribe Colorsoft: 11 in panel, 1980x2640 px at 300 ppi = 6.6 x 8.8 in.
+# Presets are the full panel; explicit dimensions are the escape hatch.
+DEVICE_PRESETS: dict[str, ReaderConfig] = {
+    "scribe-colorsoft": ReaderConfig(screen_width_in=6.6, screen_height_in=8.8),
+}
+
+DEFAULT_DEVICE = "scribe-colorsoft"
+DEFAULT_READER = DEVICE_PRESETS[DEFAULT_DEVICE]
 
 
 @dataclass(frozen=True)
@@ -24,6 +60,7 @@ class ServerConfig:
     max_input_bytes: int = 256 * 1024 * 1024
     retry_backoff: RetryBackoff = field(default_factory=RetryBackoff)
     state_path: Path | None = None
+    reader: ReaderConfig = DEFAULT_READER
 
     @property
     def upload_dir(self) -> Path:
@@ -65,7 +102,54 @@ _SCALAR_FIELDS = {
 
 
 _RETRY_BACKOFF_FIELDS = {"initial_seconds", "max_seconds", "multiplier", "max_attempts"}
-_ALLOWED_SERVER_KEYS = set(_SCALAR_FIELDS) | {"root", "state_path", "retry_backoff"}
+_ALLOWED_SERVER_KEYS = set(_SCALAR_FIELDS) | {
+    "root",
+    "state_path",
+    "retry_backoff",
+    "reader",
+}
+
+_READER_FIELDS = {"device", "screen_width_in", "screen_height_in"}
+
+
+def _parse_reader(raw: object) -> ReaderConfig:
+    """Validate `[reader]`: an explicit `device` key conflicts with explicit
+    dimensions (the built-in default does not); dimensions come as a pair."""
+    if not isinstance(raw, dict):
+        raise ValueError("reader must be a table")
+    unknown = set(raw) - _READER_FIELDS
+    if unknown:
+        raise ValueError(f"unknown reader keys: {', '.join(sorted(unknown))}")
+
+    has_device = "device" in raw
+    dims = [k for k in ("screen_width_in", "screen_height_in") if k in raw]
+    if has_device and dims:
+        raise ValueError(
+            "reader.device conflicts with explicit screen dimensions; set one or "
+            "the other"
+        )
+    if dims and len(dims) != 2:
+        raise ValueError(
+            "reader screen dimensions require both screen_width_in and "
+            "screen_height_in"
+        )
+
+    if dims:
+        values = []
+        for key in ("screen_width_in", "screen_height_in"):
+            value = raw[key]
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                raise ValueError(f"reader.{key} must be a number")
+            if value <= 0:
+                raise ValueError(f"reader.{key} must be > 0")
+            values.append(float(value))
+        return ReaderConfig(screen_width_in=values[0], screen_height_in=values[1])
+
+    device = raw.get("device", DEFAULT_DEVICE)
+    if device not in DEVICE_PRESETS:
+        known = ", ".join(sorted(DEVICE_PRESETS))
+        raise ValueError(f"unknown reader.device {device!r}; known devices: {known}")
+    return DEVICE_PRESETS[device]
 
 
 def load_server_config(path: Path | str) -> ServerConfig:
@@ -111,6 +195,8 @@ def load_server_config(path: Path | str) -> ServerConfig:
         if backoff.max_attempts < 1:
             raise ValueError("retry_backoff.max_attempts must be >= 1")
         kwargs["retry_backoff"] = backoff
+    if "reader" in raw:
+        kwargs["reader"] = _parse_reader(raw["reader"])
 
     cfg = ServerConfig(**kwargs)  # type: ignore[arg-type]
     if cfg.worker_count < 1:
